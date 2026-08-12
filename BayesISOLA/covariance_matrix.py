@@ -38,6 +38,9 @@ class covariance_matrix:
 		self.Cd_inv_shifts = []
 		self.Cd_shifts = []
 		self.LT_shifts = []
+		self.has_covariance = False
+		self.crosscovariance = False
+		self.factorized_noise = False
 
 	def __exit__(self, exc_type, exc_value, traceback):
 		self.__del__()
@@ -51,4 +54,7 @@ class covariance_matrix:
 		del self.Cd_inv_shifts
 		del self.Cd_shifts
 		del self.LT_shifts
+		del self.has_covariance
+		del self.crosscovariance
+		del self.factorized_noise
 		

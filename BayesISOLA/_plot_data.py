@@ -11,6 +11,7 @@ from matplotlib.lines import Line2D
 
 from BayesISOLA.fileformats import read_elemse, read_elemse_from_files
 from BayesISOLA.helpers import my_filter
+from BayesISOLA._paths import green_path
 
 
 def align_yaxis(ax1, ax2, v1=0, v2=0):
@@ -61,7 +62,7 @@ def plot_seismo(self, outfile='$outdir/seismo.png', comp_order='ZNE', cholesky=F
 	if self.MT.centroid['path']:
 		elemse = read_elemse_from_files(self.inp.nr, self.MT.centroid['path'], self.inp.stations, self.inp.event['t'], self.data.samprate, self.data.npts_elemse, self.data.invert_displacement)
 	else:
-		elemse = read_elemse(self.inp.nr, self.data.npts_elemse, 'green/elemse'+self.MT.centroid['id']+'.dat', self.inp.stations, self.data.invert_displacement)
+		elemse = read_elemse(self.inp.nr, self.data.npts_elemse, green_path('elemse'+self.MT.centroid['id']+'.dat'), self.inp.stations, self.data.invert_displacement)
 	#if not no_filter:
 	for r in range(self.inp.nr):
 		for e in range(6):
@@ -136,8 +137,8 @@ def plot_seismo(self, outfile='$outdir/seismo.png', comp_order='ZNE', cholesky=F
 			if add_file2:
 				ax[r,c].plot(t, add2[:, 3*sta+comp], add_file2_style, linewidth=add_file2_width)
 	ax[-1,0].set_ylim([-d_max, d_max])
-	ea.append(f.legend((l_d, l_s), ('inverted data', 'modeled (synt)'), loc='lower center', bbox_to_anchor=(0.5, 1.-0.0066*len(plot_stations)), ncol=2, numpoints=1, fontsize='small', fancybox=True, handlelength=3)) # , borderaxespad=0.1
-	ea.append(f.text(0.1, 1.06-0.004*len(plot_stations), 'x', color='white', ha='center', va='center'))
+	legend_y = 1.0 - 0.06 / f.get_figheight()
+	ea.append(f.legend((l_d, l_s), ('inverted data', 'modeled (synt)'), loc='upper center', bbox_to_anchor=(0.5, legend_y), ncol=2, numpoints=1, fontsize='small', fancybox=True, handlelength=3))
 	outfile = outfile.replace('$outdir', self.outdir)
 	self.plot_seismo_backend_2(outfile, plot_stations, comps, ax, extra_artists=ea)
 	if cholesky:
@@ -241,7 +242,7 @@ def plot_noise(self, outfile='$outdir/noise.png', comp_order='ZNE', obs_style='k
 		for i in range(len(comps)):
 			l4 = ax[r,i].add_patch(mpatches.Rectangle((-NPTS/samprate, -ymax), NPTS/samprate, 2*ymax, color=(1.0, 0.6, 0.4))) # (x,y), width, height
 			l5 = ax[r,i].add_patch(mpatches.Rectangle((0, -ymax), self.data.npts_slice/samprate, 2*ymax, color=(0.7, 0.7, 0.7)))
-	ea.append(f.legend((l4, l5), ('$C_D$', 'inverted'), 'lower center', bbox_to_anchor=(0.5, 1.-0.0066*len(plot_stations)), ncol=2, fontsize='small', fancybox=True, handlelength=3, handleheight=1.2)) # , borderaxespad=0.1
+	ea.append(f.legend((l4, l5), ('$C_D$', 'inverted'), loc='lower center', bbox_to_anchor=(0.5, 1.-0.0066*len(plot_stations)), ncol=2, fontsize='small', fancybox=True, handlelength=3, handleheight=1.2)) # , borderaxespad=0.1
 	ea.append(f.text(0.1, 1.06-0.004*len(plot_stations), 'x', color='white', ha='center', va='center'))
 	outfile = outfile.replace('$outdir', self.outdir)
 	self.plot_seismo_backend_2(outfile, plot_stations, comps, ax, extra_artists=ea)
@@ -277,7 +278,8 @@ def plot_spectra(self, outfile='$outdir/spectra.png', comp_order='ZNE', plot_sta
 			#ax[i,j].set_yscale('log')
 			ax3[i,j] = ax[i,j].twinx()
 			#ax3[i,j].set_yscale('log')
-	ax3[0,0].get_shared_y_axes().join(*ax3.flatten().tolist())
+	for axis in ax3.flatten()[1:]:
+		axis.sharey(ax3[0,0])
 
 	dt = 1./samprate
 	DT = 0.5*dt
@@ -359,7 +361,11 @@ def plot_seismo_backend_1(self, plot_stations, plot_components, comp_order, cros
 		comps = [0, 1, 2]
 	
 	COMPS = (1,3)[crosscomp]
-	f, ax = plt.subplots(len(plot_stations)*COMPS, len(comps), sharex=True, sharey=('row', True)[sharey], figsize=(len(comps)*6, len(plot_stations)*2*COMPS))
+	fig_height = max(3.5, len(plot_stations)*2*COMPS)
+	f, ax = plt.subplots(len(plot_stations)*COMPS, len(comps), sharex=True, sharey=('row', True)[sharey], figsize=(len(comps)*6, fig_height))
+	# Matplotlib's default 0.88/0.11 top/bottom fractions create several inches
+	# of whitespace for tall multi-station figures. Keep the margins physical.
+	f.subplots_adjust(left=0.12, right=0.985, top=1.-0.9/fig_height, bottom=0.55/fig_height, hspace=0.12, wspace=0.05)
 	if len(plot_stations)==1 and len(comps)>1: # one row only
 		ax = np.reshape(ax, (1,len(comps)))
 	elif len(plot_stations)>1 and len(comps)==1: # one column only
@@ -396,9 +402,9 @@ def plot_seismo_backend_1(self, plot_stations, plot_components, comp_order, cros
 					ax[COMPS*r+C,c].get_xaxis().set_visible(False)
 	extra_artists = []
 	if xlabel:
-		extra_artists.append(f.text(0.5, 0.04+0.002*len(plot_stations), xlabel, ha='center', va='center'))
+		extra_artists.append(f.text(0.5, 0.16/fig_height, xlabel, ha='center', va='center'))
 	if ylabel:
-		extra_artists.append(f.text(0.04*(len(comps)-1)-0.02, 0.5, ylabel, ha='center', va='center', rotation='vertical'))
+		extra_artists.append(f.text(0.045, 0.5, ylabel, ha='center', va='center', rotation='vertical'))
 	return plot_stations, comps, f, ax, extra_artists
 
 def plot_seismo_backend_2(self, outfile, plot_stations, comps, ax, yticks=True, extra_artists=None):

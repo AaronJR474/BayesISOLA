@@ -48,8 +48,7 @@ def load_streams_fdsnws(self, hosts, t_before=90, t_after=360, save_to=None):
 				else:
 					st = read(url_data)
 					inv = read_inventory(url_resp)
-					st.attach_response(inv)
-					attach_xml_paz(st)
+					attach_xml_paz(st, inventory=inv)
 			except:
 				# print(sta['network'], sta['code'], host, 'exception')
 				#print(url_data) # DEBUG

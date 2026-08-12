@@ -6,6 +6,7 @@ from obspy import UTCDateTime
 
 from BayesISOLA.fileformats import read_elemse
 from BayesISOLA.helpers import my_filter
+from BayesISOLA._paths import green_path
 
 def VR_of_components(self, n=1):
 	"""
@@ -19,8 +20,9 @@ def VR_of_components(self, n=1):
 	Calculate the variance reduction from a subset of the closest stations (with minimal ``n`` components used) leading to the highest variance reduction and save it to ``self.max_VR``.
 	"""
 	npts = self.d.npts_slice
+	has_covariance = bool(getattr(self.cova, 'has_covariance', False) or self.cova.Cd_inv or self.cova.Cd_inv_shifts)
 	data = self.d.data_shifts[self.centroid['shift_idx']]
-	elemse = read_elemse(self.inp.nr, self.d.npts_elemse, 'green/elemse'+self.centroid['id']+'.dat', self.inp.stations, self.d.invert_displacement) # read elemse
+	elemse = read_elemse(self.inp.nr, self.d.npts_elemse, green_path('elemse'+self.centroid['id']+'.dat'), self.inp.stations, self.d.invert_displacement) # read elemse
 	for r in range(self.inp.nr):
 		for e in range(6):
 			my_filter(elemse[r][e], self.inp.stations[r]['fmin'], self.inp.stations[r]['fmax'])
@@ -38,7 +40,7 @@ def VR_of_components(self, n=1):
 				SYNT[comp] += elemse[sta][e][comp].data[0:npts] * self.centroid['a'][e,0]
 		comps_used = 0
 		for comp in range(3):
-			if self.cova.Cd_inv and not self.inp.stations[sta][{0:'useZ', 1:'useN', 2:'useE'}[comp]]:
+			if has_covariance and not self.inp.stations[sta][{0:'useZ', 1:'useN', 2:'useE'}[comp]]:
 				self.inp.stations[sta][{0:'VR_Z', 1:'VR_N', 2:'VR_E'}[comp]] = None
 				continue
 			synt = SYNT[comp]
@@ -55,7 +57,7 @@ def VR_of_components(self, n=1):
 					d    += np.dot(self.cova.LT3[sta][y1:y2, x1:x2], data[sta][COMP].data[0:npts])
 					synt += np.dot(self.cova.LT3[sta][y1:y2, x1:x2], SYNT[COMP])
 				
-			elif self.cova.Cd_inv:
+			elif has_covariance:
 				d    = np.dot(self.cova.LT[sta][comp], d)
 				synt = np.dot(self.cova.LT[sta][comp], synt)
 				

@@ -13,6 +13,8 @@ class process_data:
     :param s_velocity: characteristic S-wave velocity used for calculating number of wave lengths between the source and stations (default 3000 m/s)
     :type threads: integer, optional
     :param threads: number of threads for parallelization (default 2)
+    :type progress: bool, optional
+    :param progress: show progress bars for Green's-function calculation and moment-tensor inversion when :mod:`tqdm` is available (default ``True``)
     :type invert_displacement: bool, optional
     :param invert_displacement: convert observed and modeled waveforms to displacement prior comparison (if ``True``), otherwise compare it in velocity (default ``False``)
     :type use_precalculated_Green: bool or ``'auto'``, optional
@@ -81,13 +83,14 @@ class process_data:
 	from BayesISOLA._parameters import set_frequencies, set_working_sampling, count_components, min_time, max_time, set_time_window, set_parameters, skip_short_records
 	from BayesISOLA._process_data import correct_data, trim_filter_data, decimate_shift
 
-	def __init__(self, data, grid, s_velocity=3000, velocity_ot_the_fastest_wave=8000, velocity_ot_the_slowest_wave = 1000, threads=2, invert_displacement=False, use_precalculated_Green=False, correct_data=True, set_parameters=True, fmax=1., fmin=0., min_depth=1000., skip_short_records=False, calculate_or_verify_Green=True, trim_filter_data=True, decimate_shift=True):
+	def __init__(self, data, grid, s_velocity=3000, velocity_ot_the_fastest_wave=8000, velocity_ot_the_slowest_wave = 1000, threads=2, invert_displacement=False, use_precalculated_Green=False, correct_data=True, set_parameters=True, fmax=1., fmin=0., min_depth=1000., skip_short_records=False, calculate_or_verify_Green=True, trim_filter_data=True, decimate_shift=True, progress=True):
 		self.d = data
 		self.grid = grid
 		self.s_velocity = s_velocity
 		self.velocity_ot_the_fastest_wave = velocity_ot_the_fastest_wave
 		self.velocity_ot_the_slowest_wave = velocity_ot_the_slowest_wave
 		self.threads = threads
+		self.progress = bool(progress)
 		self.invert_displacement = invert_displacement
 		self.use_precalculated_Green = use_precalculated_Green
 		self.data = []

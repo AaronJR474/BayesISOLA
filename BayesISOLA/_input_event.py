@@ -4,6 +4,8 @@
 import math
 from obspy import UTCDateTime
 
+from BayesISOLA._paths import green_path
+
 def read_event_info(self, filename):
 	"""
 	Read event coordinates, magnitude, and time from a file in specified format (see below)
@@ -99,7 +101,7 @@ def set_source_time_function(self, type, t0=0, t1=0):
 		description = "Brune, length = {0:3.1f} s".format(t0)
 	# TODO source complex spectrum is given as array and written to a file (uncomment reading file 301 in elemse.for)
 	self.stf_description = description
-	f = open('green/soutype.dat', 'w')
+	f = open(green_path('soutype.dat'), 'w')
 	f.write("{0:d}\n{1:3.1f}\n{2:3.1f}\n{3:d}\n".format(ics, t0, t1, icc))
 	f.close()
 	

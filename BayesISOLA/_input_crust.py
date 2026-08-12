@@ -3,7 +3,9 @@
 
 import shutil
 
-def read_crust(self, source, output='green/crustal.dat'):
+from BayesISOLA._paths import green_path
+
+def read_crust(self, source, output=None):
 	"""
 	Copy a file or files with crustal model definition to location where code ``Axitra`` expects it
 	
@@ -12,6 +14,11 @@ def read_crust(self, source, output='green/crustal.dat'):
 	:param output: path to copy target
 	:type output: string, optional
 	"""
+	source = str(source)
+	if output is None:
+		output = str(green_path('crustal.dat'))
+	else:
+		output = str(output)
 	inputs = []
 	for model in self.models:
 		if model:

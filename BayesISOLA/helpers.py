@@ -7,7 +7,7 @@ Various data manipulation / arithmetic / waveform filtering functions.
 """
 
 import numpy as np
-import fractions
+from math import gcd
 
 def rename_keys(somedict, prefix='', suffix=''):
 	"""
@@ -45,7 +45,7 @@ def lcmm(b, *args):
 		a = 3/a
 		if a - round(a) < 1e6:
 			a = round(a)
-		b = fractions.gcd(a, b)
+		b = gcd(a, b)
 	return 3/b
 
 def my_filter(data, fmin, fmax):

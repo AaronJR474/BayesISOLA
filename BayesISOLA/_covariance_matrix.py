@@ -43,7 +43,7 @@ def running_mean(x, N):
 	return rm
 
 
-def covariance_matrix_noise(self, crosscovariance=False, save_non_inverted=False, save_covariance_function=False):
+def covariance_matrix_noise(self, crosscovariance=False, save_non_inverted=False, save_covariance_function=False, store_inverse=False):
 	"""
 	Creates covariance matrix :math:`C_D` from ``self.d.noise``.
 	
@@ -53,6 +53,8 @@ def covariance_matrix_noise(self, crosscovariance=False, save_non_inverted=False
 	:param save_non_inverted: If ``True``, save also non-inverted matrix, which can be plotted later.
 	:type save_covariance_function: bool, optional
 	:param save_covariance_function: If ``True``, save also the covariance function matrix, which can be plotted later.
+	:type store_inverse: bool, optional
+	:param store_inverse: If ``True``, retain the explicit inverse covariance blocks in ``Cd_inv`` for legacy/debugging use. The default ``False`` keeps only the whitening factors used by the inversion, reducing retained memory without changing the generalized least-squares objective.
 	"""
 	self.log('\nCreating covariance matrix')
 	if not self.d.noise:
@@ -60,6 +62,12 @@ def covariance_matrix_noise(self, crosscovariance=False, save_non_inverted=False
 		raise ValueError('No noise slice to generate covariance matrix.')
 	n = self.d.npts_slice
 	self.Cf = []
+	self.Cd_inv = []
+	self.LT = []
+	self.LT3 = []
+	self.has_covariance = True
+	self.crosscovariance = bool(crosscovariance)
+	self.factorized_noise = True
 	for r in range(len(self.stations)):
 		sta = self.stations[r]
 		idx = []
@@ -122,7 +130,8 @@ def covariance_matrix_noise(self, crosscovariance=False, save_non_inverted=False
 			try:
 				C_inv = np.linalg.inv(C)
 				self.LT3.append(np.linalg.cholesky(C_inv).T)
-				self.Cd_inv.append(C_inv)
+				if store_inverse:
+					self.Cd_inv.append(C_inv)
 			except:
 				w,v = np.linalg.eig(C)
 				print('Minimal eigenvalue C[{0:1d}]: {1:6.1e}, clipping'.format(r,min(w)))
@@ -139,16 +148,19 @@ def covariance_matrix_noise(self, crosscovariance=False, save_non_inverted=False
 					w = w.real.clip(min=0) # DEBUG
 					v = v.real # DEBUG
 					C_inv = v.dot(np.diag(w)).dot(v.T)
-				self.Cd_inv.append(C_inv)
+				if store_inverse:
+					self.Cd_inv.append(C_inv)
 				self.LT3.append(np.diag(np.sqrt(w)).dot(v.T))
 				self.LT.append([1, 1, 1])
 		elif crosscovariance: # C is zero-size matrix
-			self.Cd_inv.append(C)
+			if store_inverse:
+				self.Cd_inv.append(C)
 			self.LT.append([1, 1, 1])
 			self.LT3.append(1)
 		else:
 			C_inv = np.linalg.inv(C)
-			self.Cd_inv.append(C_inv)
+			if store_inverse:
+				self.Cd_inv.append(C_inv)
 			self.LT.append([1, 1, 1])
 			for i in idx:
 				I = idx.index(i)*n

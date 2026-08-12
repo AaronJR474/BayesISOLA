@@ -7,6 +7,8 @@ from pyproj import Geod
 import obspy
 from obspy.geodetics.base import gps2dist_azimuth
 
+from BayesISOLA._paths import green_path
+
 def read_network_info_DB(self, db, host, port=-1, user=None, password=None, min_distance=None, max_distance=None):
 	"""
 	Reads station coordinates from `SeisComp3` database.
@@ -165,7 +167,7 @@ def create_station_index(self):
 	for i in range(self.nr):
 		self.stations_index['_'.join([stats[i]['network'], stats[i]['code'], stats[i]['location'], stats[i]['channelcode']])] = stats[i]
 
-def write_stations(self, filename='green/station.dat'):
+def write_stations(self, filename=None):
 	"""
 	Write file with carthesian coordinates of stations. The file is necessary for Axitra code.
 	
@@ -174,6 +176,10 @@ def write_stations(self, filename='green/station.dat'):
 	:param filename: name (with path) to created file
 	:type filename: string, optional
 	"""
+	if filename is None:
+		filename = str(green_path('station.dat'))
+	else:
+		filename = str(filename)
 	for model in self.models:
 		if model:
 			f = filename[0:filename.rfind('.')] + '-' + model + filename[filename.rfind('.'):]

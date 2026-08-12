@@ -6,6 +6,7 @@ from obspy import UTCDateTime
 
 from BayesISOLA.fileformats import read_elemse
 from BayesISOLA.helpers import my_filter
+from BayesISOLA._paths import green_path
 
 def save_seismo(self, file_d, file_synt):
 	"""
@@ -20,7 +21,7 @@ def save_seismo(self, file_d, file_synt):
 	"""
 	data = self.d.data_shifts[self.centroid['shift_idx']]
 	npts = self.d.npts_slice
-	elemse = read_elemse(self.inp.nr, self.d.npts_elemse, 'green/elemse'+self.centroid['id']+'.dat', self.inp.stations, self.d.invert_displacement) # nacist elemse
+	elemse = read_elemse(self.inp.nr, self.d.npts_elemse, green_path('elemse'+self.centroid['id']+'.dat'), self.inp.stations, self.d.invert_displacement) # nacist elemse
 	for r in range(self.inp.nr):
 		for e in range(6):
 			my_filter(elemse[r][e], self.inp.stations[r]['fmin'], self.inp.stations[r]['fmax'])

@@ -111,19 +111,25 @@ def plot_uncertainty(self, outfile='$outdir/uncertainty.png', n=200, reference=N
 	
 	# Compute standard deviation
 	stdev = {'dc':np.std(dc_perc)/100, 'clvd':np.std(clvd_perc)/100, 'iso':np.std(iso_perc)/100, 'Mw':np.std(Mw)/0.2, 't':np.std(shift), 'x':np.std(NS), 'y':np.std(EW), 'z':np.std(depth)}
+
+	# Diagnose discrete posterior support independently for space and time.
+	# A single sampled value gives zero spread on the discrete grid, but does
+	# not quantify uncertainty below the grid/time-step resolution.
+	support = {
+		't': len(np.unique(shift)),
+		'x': len(np.unique(NS)),
+		'y': len(np.unique(EW)),
+		'z': len(np.unique(depth)),
+	}
+	degenerate = [key for key, count in support.items() if count <= 1]
+	if degenerate:
+		self.log(
+			'Warning: posterior uncertainty realizations occupy only one sampled '
+			'value for {0}. The corresponding standard deviation is therefore '
+			'0 on the discrete space-time grid; this does not quantify sub-grid '
+			'uncertainty.'.format(', '.join(degenerate))
+		)
 	
-	# Compute standard deviation of strike/dip/rake # TODO
-	strike1 = []; dip1 = []; rake1 = []
-	count2 = 0
-	for str in strike:
-		if (str > 0) and (str < 50):
-			strike1.extend([str])
-			dip1.extend([dip[count2]])
-		count2 = count2 + 1
-	for rk in rake:
-		if (rk > -50) and (rk < 50):
-			rake1.extend([rk])
-	stdev2 = {'strike':np.std(strike1), 'dip':np.std(dip1), 'rake':np.std(rake1)}
 	
 	# Plot centroid uncertainty
 	fig = plt.figure(figsize=(5,5))

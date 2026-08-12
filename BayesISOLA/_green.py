@@ -5,9 +5,16 @@ import multiprocessing as mp
 import numpy as np
 import os.path
 import hashlib
+from contextlib import nullcontext
+
+try:
+	from tqdm.auto import tqdm
+except ImportError:
+	tqdm = None
 
 from BayesISOLA.axitra import Axitra_wrapper
 import BayesISOLA.syngine
+from BayesISOLA._paths import green_path
 
 def set_Greens_parameters(self):
 	"""
@@ -31,9 +38,9 @@ def write_Greens_parameters(self):
 	"""
 	for model in self.d.models:
 		if model:
-			f = 'green/grdat' + '-' + model + '.hed'
+			f = green_path('grdat-' + model + '.hed')
 		else:
-			f = 'green/grdat.hed'
+			f = green_path('grdat.hed')
 		grdat = open(f, 'w')
 		grdat.write("&input\nnc=99\nnfreq={freq:d}\ntl={tl:1.2f}\naw=0.5\nnr={nr:d}\nns=1\nxl={xl:1.1f}\nikmax=100000\nuconv=0.1E-06\nfref=1.\n/end\n".format(freq=self.freq,tl=self.tl,nr=self.d.models[model], xl=self.xl)) # 'nc' is probably ignored in the current version of gr_xyz???
 		grdat.close()
@@ -44,7 +51,7 @@ def verify_Greens_parameters(self):
 	If it agrees, return True, otherwise returns False, print error description, and writes it into log.
 	"""
 	try:
-		grdat = open('green/grdat.hed', 'r')
+		grdat = open(green_path('grdat.hed'), 'r')
 	except:
 		readable = False
 	else:
@@ -63,16 +70,16 @@ def verify_Greens_headers(self):
 	Checked whether elementary-seismogram-metadata files (created when the Green's functions were calculated) agree with curent grid points positions.
 	Used to verify whether pre-calculated Green's functions were calculated on the same grid as used now.
 	"""
-	md5_crustal = hashlib.md5(open('green/crustal.dat', 'rb').read()).hexdigest()
-	md5_station = hashlib.md5(open('green/station.dat', 'rb').read()).hexdigest()
-	txt_soutype = open('green/soutype.dat').read().strip().replace('\n', '_')
+	md5_crustal = hashlib.md5(open(green_path('crustal.dat'), 'rb').read()).hexdigest()
+	md5_station = hashlib.md5(open(green_path('station.dat'), 'rb').read()).hexdigest()
+	txt_soutype = open(green_path('soutype.dat')).read().strip().replace('\n', '_')
 	problem = False
 	desc = ''
 	for g in range(len(self.grid.grid)):
 		gp = self.grid.grid[g]
 		point_id = str(g).zfill(4)
 		try:
-			meta  = open('green/elemse'+point_id+'.txt', 'r')
+			meta  = open(green_path('elemse'+point_id+'.txt'), 'r')
 			lines = meta.readlines()
 			meta.close()
 		except:
@@ -127,22 +134,32 @@ def calculate_or_verify_Green(self):
 def calculate_Green(self):
 	"""
 	Runs :func:`Axitra_wrapper` (Green's function calculation) in parallel.
+
+	When ``self.progress`` is true and :mod:`tqdm` is available, progress is
+	reported per completed spatial grid point. The numerical work and result
+	ordering are unchanged.
 	"""
 	grid = self.grid.grid
 	logfile = self.d.outdir+'/log_green.txt'
 	open(logfile, "w").close() # erase file contents
+	show_progress = bool(getattr(self, 'progress', True)) and tqdm is not None
 	# run `gr_xyz` aand `elemse`
 	for model in self.d.models:
+		desc = "Green's functions" + (f" ({model})" if model else "")
 		if self.threads > 1: # parallel
-			pool = mp.Pool(processes=self.threads)
-			results = [pool.apply_async(Axitra_wrapper, args=(i, model, grid[i]['x'], grid[i]['y'], grid[i]['z'], self.npts_exp, self.elemse_start_origin, logfile)) for i in range(len(grid))]
-			output = [p.get() for p in results]
+			with mp.Pool(processes=self.threads) as pool:
+				progress_context = tqdm(total=len(grid), desc=desc, unit='pt') if show_progress else nullcontext()
+				with progress_context as bar:
+					callback = (lambda _: bar.update(1)) if bar is not None else None
+					results = [pool.apply_async(Axitra_wrapper, args=(i, model, grid[i]['x'], grid[i]['y'], grid[i]['z'], self.npts_exp, self.elemse_start_origin, logfile), callback=callback) for i in range(len(grid))]
+					output = [p.get() for p in results]
 			for i in range (len(grid)):
 				if output[i] == False:
 					grid[i]['err'] = 1
 					grid[i]['VR'] = -10
 		else: # serial
-			for i in range (len(grid)):
+			indices = tqdm(range(len(grid)), desc=desc, unit='pt') if show_progress else range(len(grid))
+			for i in indices:
 				gp = grid[i]
 				Axitra_wrapper(i, model, gp['x'], gp['y'], gp['z'], self.npts_exp, self.elemse_start_origin, logfile)
 

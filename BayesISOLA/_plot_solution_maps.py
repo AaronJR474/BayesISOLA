@@ -7,11 +7,11 @@ import scipy.interpolate
 from obspy.imaging.beachball import beach
 
 import matplotlib as mpl
-mpl.use('Agg')
 import matplotlib.pyplot as plt
 #import matplotlib.cm as cm
 #import matplotlib.colors as colors
 from matplotlib import animation
+from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d import Axes3D
 
 from BayesISOLA.MT_comps import a2mt, decompose
@@ -128,7 +128,7 @@ def plot_maps_sum(self, outfile='$outdir/map_sum.png'):
 	
 	The legend and properties of the function are similar as at function :func:`plot_maps`.
 	"""
-	if not self.cova.Cd_inv:
+	if not (getattr(self.cova, 'has_covariance', False) or self.cova.Cd_inv or self.cova.Cd_inv_shifts):
 		return False # if the data covariance matrix is unitary, we have no estimation of data errors, so the PDF has good sense
 	outfile = outfile.replace('$outdir', self.outdir)
 	self.plots['maps_sum'] = outfile
@@ -216,7 +216,7 @@ def plot_map_backend(self, x, y, s, CN, MT, color, width, highlight, xmin, xmax,
 	#if xmin != ymin or xmax != ymax:
 	plt.axis('equal')
 	plt.xlim(xmin, xmax)
-	plt.ylim(ymin, ymax, int(np.sign(ydiff)))
+	plt.ylim(ymin, ymax)
 	if xlabel: plt.xlabel(xlabel)
 	if ylabel: plt.ylabel(ylabel)
 	if title: plt.title(title)
@@ -276,47 +276,71 @@ def plot_map_backend(self, x, y, s, CN, MT, color, width, highlight, xmin, xmax,
 		#ll,bb,ww,hh = CB2.ax.get_position().bounds
 		#CB2.ax.set_position([l+0.58*w, bb+0.07*h, ww, hh])
 	
-	# legend beachball's color = DC%
-	if self.MT.decompose:
-		x = y = xmin*2
-		plt.plot([x],[y], marker='o', markersize=15, color=(1, 0, 0), label='DC 100 %')
-		plt.plot([x],[y], marker='o', markersize=15, color=(.5, 0, .5), label='DC 50 %')
-		plt.plot([x],[y], marker='o', markersize=15, color=(0, 0, 1), label='DC 0 %')
-		mpl.rcParams['legend.handlelength'] = 0
-		if CN and s:
-			plt.legend(loc='upper left', numpoints=1, bbox_to_anchor=(1, -0.05), fancybox=True)
-		else:
-			plt.legend(loc='upper right', numpoints=1, bbox_to_anchor=(0.95, -0.05), fancybox=True)
-	
-	# legend beachball's area
-	if beachball_size_c: # beachball's area = PDF
-		r_max = self.grid.step_x/1e3/2
-		r_half = r_max/1.4142
-		text_max = 'maximal PDF'
-		text_half = 'half-of-maximum PDF'
-		text_area = 'Beachball area ~ PDF'
-	else: # beachball's radius = VR
-		VRmax = self.MT.centroid['VR']
-		r_max = self.grid.step_x/1e3/2 * VRmax
-		r_half = r_max/2
-		text_max = 'VR {0:2.0f} % (maximal)'.format(VRmax*100)
-		text_half = 'VR {0:2.0f} %'.format(VRmax*100/2)
-		text_area = 'Beachball radius ~ VR'
-	x_symb = [xmin+r_max, xmin][bool(CN and s)] # min(xmin, -0.8*ydiff)
-	x_text = xmin+r_max*1.8
-	y_line = ymin-ydiff*0.11
-	VRlegend = plt.Circle((x_symb, y_line), r_max, facecolor=(1, 0, 0), edgecolor='k', clip_on=False)
-	ax.add_artist(VRlegend)
-	VRlegendtext = plt.text(x_text, y_line, text_max, verticalalignment='center')
-	ax.add_artist(VRlegendtext)
-	y_line = ymin-ydiff*0.20
-	VRlegend2 = plt.Circle((x_symb, y_line), r_half, facecolor=(1, 0, 0), edgecolor='k', clip_on=False)
-	ax.add_artist(VRlegend2)
-	VRlegendtext2 = plt.text(x_text, y_line, text_half, verticalalignment='center')
-	ax.add_artist(VRlegendtext2)
-	y_line = ymin-ydiff*0.26
-	VRlegendtext3 = plt.text(x_text, y_line, text_area, verticalalignment='center')
-	ax.add_artist(VRlegendtext3)
+	# Compact figure-relative legend for the strongly elongated PDF side views.
+	# Reserve a fixed physical band below the x-axis; the legacy data-coordinate
+	# placement and a two-column legend both collide with the axis on narrow plots.
+	if beachball_size_c and title == 'PDF sum: side view':
+		handles = [
+			Line2D([], [], marker='o', linestyle='None', markersize=13, markerfacecolor='red', markeredgecolor='k', label='maximal PDF'),
+			Line2D([], [], marker='o', linestyle='None', markersize=9, markerfacecolor='red', markeredgecolor='k', label='half-max PDF'),
+		]
+		if self.MT.decompose:
+			handles.extend([
+				Line2D([], [], marker='o', linestyle='None', markersize=10, color=(1, 0, 0), label='DC 100 %'),
+				Line2D([], [], marker='o', linestyle='None', markersize=10, color=(.5, 0, .5), label='DC 50 %'),
+				Line2D([], [], marker='o', linestyle='None', markersize=10, color=(0, 0, 1), label='DC 0 %'),
+			])
+		fig = plt.gcf()
+		bottom_in = 2.65 if self.MT.decompose else 1.85
+		fig.subplots_adjust(bottom=min(0.30, bottom_in / fig.get_figheight()))
+		fig.legend(
+			handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.015), ncol=1,
+			fontsize='x-small', fancybox=True, frameon=True,
+			title='Beachball area ~ PDF\ncolor = DC' if self.MT.decompose else 'Beachball area ~ PDF',
+			borderaxespad=0.0, labelspacing=0.45, handletextpad=0.7,
+		)
+	else:
+		# legend beachball's color = DC%
+		if self.MT.decompose:
+			x = y = xmin*2
+			plt.plot([x],[y], marker='o', markersize=15, color=(1, 0, 0), label='DC 100 %')
+			plt.plot([x],[y], marker='o', markersize=15, color=(.5, 0, .5), label='DC 50 %')
+			plt.plot([x],[y], marker='o', markersize=15, color=(0, 0, 1), label='DC 0 %')
+			mpl.rcParams['legend.handlelength'] = 0
+			if CN and s:
+				plt.legend(loc='upper left', numpoints=1, bbox_to_anchor=(1, -0.05), fancybox=True)
+			else:
+				plt.legend(loc='upper right', numpoints=1, bbox_to_anchor=(0.95, -0.05), fancybox=True)
+
+		# legend beachball's area
+		if beachball_size_c: # beachball's area = PDF
+			r_max = self.grid.step_x/1e3/2
+			r_half = r_max/1.4142
+			text_max = 'maximal PDF'
+			text_half = 'half-of-maximum PDF'
+			text_area = 'Beachball area ~ PDF'
+		else: # beachball's radius = VR
+			VRmax = self.MT.centroid['VR']
+			r_max = self.grid.step_x/1e3/2 * VRmax
+			r_half = r_max/2
+			text_max = 'VR {0:2.0f} % (maximal)'.format(VRmax*100)
+			text_half = 'VR {0:2.0f} %'.format(VRmax*100/2)
+			text_area = 'Beachball radius ~ VR'
+		x_symb = [xmin+r_max, xmin][bool(CN and s)]
+		x_text = xmin+r_max*1.8
+		y_line = ymin-ydiff*0.11
+		VRlegend = plt.Circle((x_symb, y_line), r_max, facecolor=(1, 0, 0), edgecolor='k', clip_on=False)
+		ax.add_artist(VRlegend)
+		VRlegendtext = plt.text(x_text, y_line, text_max, verticalalignment='center')
+		ax.add_artist(VRlegendtext)
+		y_line = ymin-ydiff*0.20
+		VRlegend2 = plt.Circle((x_symb, y_line), r_half, facecolor=(1, 0, 0), edgecolor='k', clip_on=False)
+		ax.add_artist(VRlegend2)
+		VRlegendtext2 = plt.text(x_text, y_line, text_half, verticalalignment='center')
+		ax.add_artist(VRlegendtext2)
+		y_line = ymin-ydiff*0.26
+		VRlegendtext3 = plt.text(x_text, y_line, text_area, verticalalignment='center')
+		ax.add_artist(VRlegendtext3)
 
 	if outfile:
 		plt.savefig(outfile, bbox_inches='tight')

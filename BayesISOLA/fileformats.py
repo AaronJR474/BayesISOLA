@@ -77,6 +77,9 @@ def read_elemse(nr, npts, filename, stations, invert_displacement=False):
 
 	:return: elementary seismograms in form of list of lists of streams
 	"""
+    
+	filename = os.fspath(filename)
+    
 	ff = {}
 	tr = Trace(data=np.empty(npts))
 	tr.stats.npts = npts
@@ -134,9 +137,18 @@ def attach_xml_paz(st, paz_file=None, inventory=None):
 	"""
 	if paz_file:
 		inv = read_inventory(paz_file)
-		st.attach_response(inv)
-	elif inventory:
-		st.attach_response(inventory)		
+	elif inventory is not None:
+		inv = inventory
+	else:
+		inv = None
+
+	if inv is not None:
+		for tr in st:
+			tr.stats.response = inv.get_response(
+				tr.id,
+				tr.stats.starttime,
+			)
+
 	for tr in st:
 		tr.stats.paz = tr.stats.response.get_paz()
 		tr.stats.paz.gain = tr.stats.paz.normalization_factor # VERIFY

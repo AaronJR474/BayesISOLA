@@ -99,7 +99,7 @@ def html_log(self, outfile='$outdir/index.html', reference=None, h1='ISOLA-ObsPy
 		'</strong> moment tensor (' + 
 		{1:'5', 0:'6'}[self.MT.deviatoric] + 
 		' components)<br />\n    ' + 
-		{1:'with the <strong>data covariance matrix</strong> based on real noise', 0:'without the covariance matrix'}[bool(self.cova.Cd_inv)] + 
+		{1:'with the <strong>data covariance matrix</strong> based on real noise', 0:'without the covariance matrix'}[bool(getattr(self.cova, 'has_covariance', False) or self.cova.Cd_inv or self.cova.Cd_inv_shifts)] + 
 		{1:'<br />\n    with <strong>crosscovariance</strong> between components', 0:''}[bool(self.cova.LT3)] + 
 		'.</dd>\n  <dt>Reference</dt>\n  <dd>Vackář, Gallovič, Burjánek, Zahradník, and Clinton. Bayesian ISOLA: new tool for automated centroid moment tensor inversion, <em>in preparation</em>, <a href="http://geo.mff.cuni.cz/~vackar/papers/isola-obspy.pdf">PDF</a></dd>\n</dl>\n\n')
 	out.write(textwrap.dedent('''\
