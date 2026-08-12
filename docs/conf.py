@@ -18,11 +18,11 @@ sys.path.insert(0, os.path.abspath('../'))
 # -- Project information -----------------------------------------------------
 
 project = 'BayesISOLA'
-copyright = '2021, Jiří Vackář'
+copyright = 'Jiří Vackář and contributors'
 author = 'Jiří Vackář'
 
 # The full version, including alpha/beta/rc tags
-release = '2021-04'
+release = 'development'
 
 
 # -- General configuration ---------------------------------------------------

@@ -82,7 +82,7 @@ def set_source_time_function(self, type, t0=0, t1=0):
 	"""
 	Sets the source time function for calculating elementary seismograms.
 	
-	This function writes file ``green/soutype.dat``, which is read by ``green/elemse`` (function ``fsource()`` at the end of ``elemse.for``).
+	This function writes ``soutype.dat`` into the active Axitra workspace, where it is read by the compiled ``elemse`` program.
 	"""
 	icc = 1 # parameter-1 is used as number of derivatives in complex domain (1 = no derivative, 2 = a derivative etc.)
 	if type in ("step", "Heaviside", "step in displacement"):
@@ -101,7 +101,7 @@ def set_source_time_function(self, type, t0=0, t1=0):
 		description = "Brune, length = {0:3.1f} s".format(t0)
 	# TODO source complex spectrum is given as array and written to a file (uncomment reading file 301 in elemse.for)
 	self.stf_description = description
-	f = open(green_path('soutype.dat'), 'w')
+	f = open(green_path(self.green_dir, 'soutype.dat'), 'w')
 	f.write("{0:d}\n{1:3.1f}\n{2:3.1f}\n{3:d}\n".format(ics, t0, t1, icc))
 	f.close()
 	

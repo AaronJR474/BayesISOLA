@@ -1,0 +1,48 @@
+[build-system]
+requires = ["scikit-build-core>=1.0.3"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "BayesISOLA"
+version = "0.0.0"
+description = "Centroid moment-tensor inversion with BayesISOLA"
+readme = "README.md"
+requires-python = ">=3.10"
+license-files = ["LICENSE"]
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "obspy",
+    "pandas",
+    "pyproj",
+    "requests",
+    "scipy",
+    "threadpoolctl",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+notebook = ["ipython"]
+pyfk = ["pyfk"]
+docs = ["sphinx"]
+test = ["pytest"]
+
+[project.urls]
+Repository = "https://github.com/AaronJR474/BayesISOLA"
+Upstream = "https://github.com/vackar/BayesISOLA"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.17"
+wheel.packages = ["BayesISOLA"]
+sdist.include = [
+    "BayesISOLA/**",
+    "fortran/**",
+    "examples/**",
+    "docs/**",
+    "CMakeLists.txt",
+    "README.md",
+    "LICENSE",
+    ".gitattributes",
+    ".gitignore",
+]

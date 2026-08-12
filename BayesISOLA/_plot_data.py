@@ -62,7 +62,7 @@ def plot_seismo(self, outfile='$outdir/seismo.png', comp_order='ZNE', cholesky=F
 	if self.MT.centroid['path']:
 		elemse = read_elemse_from_files(self.inp.nr, self.MT.centroid['path'], self.inp.stations, self.inp.event['t'], self.data.samprate, self.data.npts_elemse, self.data.invert_displacement)
 	else:
-		elemse = read_elemse(self.inp.nr, self.data.npts_elemse, green_path('elemse'+self.MT.centroid['id']+'.dat'), self.inp.stations, self.data.invert_displacement)
+		elemse = read_elemse(self.inp.nr, self.data.npts_elemse, green_path(self.inp.green_dir, 'elemse'+self.MT.centroid['id']+'.dat'), self.inp.stations, self.data.invert_displacement)
 	#if not no_filter:
 	for r in range(self.inp.nr):
 		for e in range(6):

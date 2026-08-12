@@ -169,7 +169,7 @@ def create_station_index(self):
 
 def write_stations(self, filename=None):
 	"""
-	Write file with carthesian coordinates of stations. The file is necessary for Axitra code.
+	Write the Cartesian station-coordinate file required by Axitra.
 	
 	This function is usually called from some of functions related to reading seismograms.
 	
@@ -177,7 +177,7 @@ def write_stations(self, filename=None):
 	:type filename: string, optional
 	"""
 	if filename is None:
-		filename = str(green_path('station.dat'))
+		filename = str(green_path(self.green_dir, 'station.dat'))
 	else:
 		filename = str(filename)
 	for model in self.models:

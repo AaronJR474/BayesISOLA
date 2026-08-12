@@ -54,7 +54,7 @@ def whiten_covariance_array(values, covariance_factors, stations, npts):
 def invert(point_id, d_shifts, norm_d, Cd_inv, Cd_inv_shifts, nr, comps, stations,
            npts_elemse, npts_slice, elemse_start_origin, origin_time, samprate,
            deviatoric=False, decomp=True, invert_displacement=False,
-           elemse_path=None, covariance_factors=None, data_whitened=False):
+           elemse_path=None, covariance_factors=None, data_whitened=False, green_dir=None):
     """
     Solves inverse problem in a single grid point for multiple time shifts.
 
@@ -62,7 +62,8 @@ def invert(point_id, d_shifts, norm_d, Cd_inv, Cd_inv_shifts, nr, comps, station
     BayesISOLA workflow.  It applies the already-computed covariance whitening
     factors rather than explicitly multiplying by ``C_D^{-1}``.  The legacy
     ``Cd_inv``/``Cd_inv_shifts`` path remains unchanged for compatibility and
-    for shift-dependent ACF covariance matrices.
+    for shift-dependent ACF covariance matrices. ``green_dir`` selects the Axitra
+    workspace when elementary seismograms are read from native files.
     """
     if deviatoric:
         ne = 5
@@ -76,7 +77,7 @@ def invert(point_id, d_shifts, norm_d, Cd_inv, Cd_inv_shifts, nr, comps, station
         )
     else:
         elemse = read_elemse(
-            nr, npts_elemse, green_path('elemse'+point_id+'.dat'),
+            nr, npts_elemse, green_path(green_dir if green_dir is not None else 'green', 'elemse'+point_id+'.dat'),
             stations, invert_displacement,
         )
 

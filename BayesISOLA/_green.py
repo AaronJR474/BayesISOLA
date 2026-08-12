@@ -14,7 +14,7 @@ except ImportError:
 
 from BayesISOLA.axitra import Axitra_wrapper
 import BayesISOLA.syngine
-from BayesISOLA._paths import green_path
+from BayesISOLA._paths import axitra_executable, green_path
 
 def set_Greens_parameters(self):
 	"""
@@ -38,9 +38,9 @@ def write_Greens_parameters(self):
 	"""
 	for model in self.d.models:
 		if model:
-			f = green_path('grdat-' + model + '.hed')
+			f = green_path(self.d.green_dir, 'grdat-' + model + '.hed')
 		else:
-			f = green_path('grdat.hed')
+			f = green_path(self.d.green_dir, 'grdat.hed')
 		grdat = open(f, 'w')
 		grdat.write("&input\nnc=99\nnfreq={freq:d}\ntl={tl:1.2f}\naw=0.5\nnr={nr:d}\nns=1\nxl={xl:1.1f}\nikmax=100000\nuconv=0.1E-06\nfref=1.\n/end\n".format(freq=self.freq,tl=self.tl,nr=self.d.models[model], xl=self.xl)) # 'nc' is probably ignored in the current version of gr_xyz???
 		grdat.close()
@@ -51,7 +51,7 @@ def verify_Greens_parameters(self):
 	If it agrees, return True, otherwise returns False, print error description, and writes it into log.
 	"""
 	try:
-		grdat = open(green_path('grdat.hed'), 'r')
+		grdat = open(green_path(self.d.green_dir, 'grdat.hed'), 'r')
 	except:
 		readable = False
 	else:
@@ -60,7 +60,7 @@ def verify_Greens_parameters(self):
 		desc = 'Pre-calculated Green\'s functions calculated with different parameters (e.g. sampling) than used now, calculate Green\'s functions again.'
 		self.log(desc)
 		print(desc)
-		print ("Expected content of green/grdat.hed:\n&input\nnc=99\nnfreq={freq:d}\ntl={tl:1.2f}\naw=0.5\nnr={nr:d}\nns=1\nxl={xl:1.1f}\nikmax=100000\nuconv=0.1E-06\nfref=1.\n/end\n".format(freq=self.freq,tl=self.tl,nr=self.d.nr, xl=self.xl))
+		print ("Expected content of Axitra grdat.hed:\n&input\nnc=99\nnfreq={freq:d}\ntl={tl:1.2f}\naw=0.5\nnr={nr:d}\nns=1\nxl={xl:1.1f}\nikmax=100000\nuconv=0.1E-06\nfref=1.\n/end\n".format(freq=self.freq,tl=self.tl,nr=self.d.nr, xl=self.xl))
 		return False
 	grdat.close()
 	return True
@@ -70,16 +70,16 @@ def verify_Greens_headers(self):
 	Checked whether elementary-seismogram-metadata files (created when the Green's functions were calculated) agree with curent grid points positions.
 	Used to verify whether pre-calculated Green's functions were calculated on the same grid as used now.
 	"""
-	md5_crustal = hashlib.md5(open(green_path('crustal.dat'), 'rb').read()).hexdigest()
-	md5_station = hashlib.md5(open(green_path('station.dat'), 'rb').read()).hexdigest()
-	txt_soutype = open(green_path('soutype.dat')).read().strip().replace('\n', '_')
+	md5_crustal = hashlib.md5(open(green_path(self.d.green_dir, 'crustal.dat'), 'rb').read()).hexdigest()
+	md5_station = hashlib.md5(open(green_path(self.d.green_dir, 'station.dat'), 'rb').read()).hexdigest()
+	txt_soutype = open(green_path(self.d.green_dir, 'soutype.dat')).read().strip().replace('\n', '_')
 	problem = False
 	desc = ''
 	for g in range(len(self.grid.grid)):
 		gp = self.grid.grid[g]
 		point_id = str(g).zfill(4)
 		try:
-			meta  = open(green_path('elemse'+point_id+'.txt'), 'r')
+			meta  = open(green_path(self.d.green_dir, 'elemse'+point_id+'.txt'), 'r')
 			lines = meta.readlines()
 			meta.close()
 		except:
@@ -98,9 +98,9 @@ def verify_Greens_headers(self):
 				if l[0:3] != '{0:1.3f} {1:1.3f} {2:1.3f}'.format(gp['x']/1e3, gp['y']/1e3, gp['z']/1e3).split():
 					desc += 'Its coordinates differs, probably the shape of the grid was changed. '
 				if l[3] != md5_crustal:
-					desc += 'File green/crustal.dat has different hash, probably crustal model was changed. '
+					desc += 'The Axitra crustal.dat file has a different hash, probably crustal model was changed. '
 				if l[4] != md5_station:
-					desc += 'File green/station.dat has different hash, probably station set was different. '
+					desc += 'The Axitra station.dat file has a different hash, probably station set was different. '
 				if l[5] != txt_soutype:
 					desc += 'Source time function (file soutype.txt) was different. '
 			self.log(desc)
@@ -141,6 +141,9 @@ def calculate_Green(self):
 	"""
 	grid = self.grid.grid
 	logfile = self.d.outdir+'/log_green.txt'
+	green_dir = str(self.d.green_dir)
+	gr_xyz_executable = str(axitra_executable('gr_xyz'))
+	elemse_executable = str(axitra_executable('elemse'))
 	open(logfile, "w").close() # erase file contents
 	show_progress = bool(getattr(self, 'progress', True)) and tqdm is not None
 	# run `gr_xyz` aand `elemse`
@@ -151,7 +154,7 @@ def calculate_Green(self):
 				progress_context = tqdm(total=len(grid), desc=desc, unit='pt') if show_progress else nullcontext()
 				with progress_context as bar:
 					callback = (lambda _: bar.update(1)) if bar is not None else None
-					results = [pool.apply_async(Axitra_wrapper, args=(i, model, grid[i]['x'], grid[i]['y'], grid[i]['z'], self.npts_exp, self.elemse_start_origin, logfile), callback=callback) for i in range(len(grid))]
+					results = [pool.apply_async(Axitra_wrapper, args=(i, model, grid[i]['x'], grid[i]['y'], grid[i]['z'], self.npts_exp, self.elemse_start_origin, logfile, green_dir, gr_xyz_executable, elemse_executable), callback=callback) for i in range(len(grid))]
 					output = [p.get() for p in results]
 			for i in range (len(grid)):
 				if output[i] == False:
@@ -161,7 +164,7 @@ def calculate_Green(self):
 			indices = tqdm(range(len(grid)), desc=desc, unit='pt') if show_progress else range(len(grid))
 			for i in indices:
 				gp = grid[i]
-				Axitra_wrapper(i, model, gp['x'], gp['y'], gp['z'], self.npts_exp, self.elemse_start_origin, logfile)
+				Axitra_wrapper(i, model, gp['x'], gp['y'], gp['z'], self.npts_exp, self.elemse_start_origin, logfile, green_dir, gr_xyz_executable, elemse_executable)
 
 def use_elemse_from_files(self, path):
 	"""

@@ -21,7 +21,7 @@ def save_seismo(self, file_d, file_synt):
 	"""
 	data = self.d.data_shifts[self.centroid['shift_idx']]
 	npts = self.d.npts_slice
-	elemse = read_elemse(self.inp.nr, self.d.npts_elemse, green_path('elemse'+self.centroid['id']+'.dat'), self.inp.stations, self.d.invert_displacement) # nacist elemse
+	elemse = read_elemse(self.inp.nr, self.d.npts_elemse, green_path(self.inp.green_dir, 'elemse'+self.centroid['id']+'.dat'), self.inp.stations, self.d.invert_displacement) # nacist elemse
 	for r in range(self.inp.nr):
 		for e in range(6):
 			my_filter(elemse[r][e], self.inp.stations[r]['fmin'], self.inp.stations[r]['fmax'])

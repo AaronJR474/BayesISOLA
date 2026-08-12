@@ -1855,12 +1855,11 @@ def _prune_inactive_bayesisola_models(inputs) -> None:
     inputs.write_stations()
 
 
-def _axitra_green_state() -> dict[str, tuple[int, int]]:
+def _axitra_green_state(data) -> dict[str, tuple[int, int]]:
     """Snapshot Axitra elementary-seismogram metadata for reuse diagnostics."""
-    from BayesISOLA._paths import GREEN_DIR
     return {
         path.name: (path.stat().st_mtime_ns, path.stat().st_size)
-        for path in Path(GREEN_DIR).glob("elemse*.txt") if path.is_file()
+        for path in Path(data.d.green_dir).glob("elemse*.txt") if path.is_file()
     }
 
 
@@ -1877,16 +1876,16 @@ def _axitra_multimodel_cache_valid(data) -> bool:
     """Verify model-specific Axitra cache files without BayesISOLA's base-model shortcut."""
     from BayesISOLA._paths import green_path
 
-    soutype = Path(green_path("soutype.dat"))
+    soutype = Path(green_path(data.d.green_dir, "soutype.dat"))
     if not soutype.is_file():
         return False
     txt_soutype = soutype.read_text().strip().replace("\n", "_")
 
     for model in data.d.models:
         suffix = f"-{model}" if model else ""
-        grdat = Path(green_path(f"grdat{suffix}.hed"))
-        crust = Path(green_path(f"crustal{suffix}.dat"))
-        station = Path(green_path(f"station{suffix}.dat"))
+        grdat = Path(green_path(data.d.green_dir, f"grdat{suffix}.hed"))
+        crust = Path(green_path(data.d.green_dir, f"crustal{suffix}.dat"))
+        station = Path(green_path(data.d.green_dir, f"station{suffix}.dat"))
         if not grdat.is_file() or not crust.is_file() or not station.is_file():
             return False
         if grdat.read_text() != _axitra_expected_grdat(data, model):
@@ -1896,8 +1895,8 @@ def _axitra_multimodel_cache_valid(data) -> bool:
 
         for i, gp in enumerate(data.grid.grid):
             point_id = str(i).zfill(4) + suffix
-            elemse = Path(green_path(f"elemse{point_id}.dat"))
-            meta = Path(green_path(f"elemse{point_id}.txt"))
+            elemse = Path(green_path(data.d.green_dir, f"elemse{point_id}.dat"))
+            meta = Path(green_path(data.d.green_dir, f"elemse{point_id}.txt"))
             if not elemse.is_file() or elemse.stat().st_size == 0 or not meta.is_file():
                 return False
             expected = (
@@ -1913,16 +1912,16 @@ def _rewrite_axitra_multimodel_metadata(data) -> None:
     """Write model-specific hashes after native Axitra finishes each model group."""
     from BayesISOLA._paths import green_path
 
-    txt_soutype = Path(green_path("soutype.dat")).read_text().strip().replace("\n", "_")
+    txt_soutype = Path(green_path(data.d.green_dir, "soutype.dat")).read_text().strip().replace("\n", "_")
     for model in data.d.models:
         suffix = f"-{model}" if model else ""
-        crust = Path(green_path(f"crustal{suffix}.dat"))
-        station = Path(green_path(f"station{suffix}.dat"))
+        crust = Path(green_path(data.d.green_dir, f"crustal{suffix}.dat"))
+        station = Path(green_path(data.d.green_dir, f"station{suffix}.dat"))
         md5_crust = hashlib.md5(crust.read_bytes()).hexdigest()
         md5_station = hashlib.md5(station.read_bytes()).hexdigest()
         for i, gp in enumerate(data.grid.grid):
             point_id = str(i).zfill(4) + suffix
-            meta = Path(green_path(f"elemse{point_id}.txt"))
+            meta = Path(green_path(data.d.green_dir, f"elemse{point_id}.txt"))
             if not meta.is_file():
                 continue
             meta.write_text(
@@ -1947,8 +1946,8 @@ def _ensure_axitra_metadata_base_files(data) -> None:
     if not models:
         raise ValueError("No active Axitra crust models remain after waveform loading.")
     model = models[0]
-    shutil.copyfile(green_path(f"crustal-{model}.dat"), green_path("crustal.dat"))
-    shutil.copyfile(green_path(f"station-{model}.dat"), green_path("station.dat"))
+    shutil.copyfile(green_path(data.d.green_dir, f"crustal-{model}.dat"), green_path(data.d.green_dir, "crustal.dat"))
+    shutil.copyfile(green_path(data.d.green_dir, f"station-{model}.dat"), green_path(data.d.green_dir, "station.dat"))
 
 
 def _calculate_or_verify_axitra_multimodel(data, use_precalculated_Green) -> bool:
@@ -3414,11 +3413,10 @@ def run_auto_cmt(
     )
 
     if gf_source == "axitra":
-        from BayesISOLA._paths import GREEN_DIR
         if normalized_gf_options["grid"] is None:
-            before_green = _axitra_green_state()
+            before_green = _axitra_green_state(data)
             data.calculate_or_verify_Green()
-            after_green = _axitra_green_state()
+            after_green = _axitra_green_state(data)
             reused = bool(use_precalculated_Green is not False and before_green and before_green == after_green)
             model_name = Path(case_crust_file).name if crust_file is not None else "event_profile"
         else:
@@ -3427,7 +3425,7 @@ def run_auto_cmt(
         gf_info = {
             "source": "axitra",
             "model": model_name,
-            "path": str(GREEN_DIR),
+            "path": str(inputs.green_dir),
             "reused": bool(reused),
             "cache_policy": use_precalculated_Green,
             "options": dict(normalized_gf_options),

@@ -5,8 +5,10 @@ import numpy as np
 import textwrap
 import re # RegExp
 import os.path
+from pathlib import Path
 
 from BayesISOLA.MT_comps import a2mt
+from BayesISOLA._paths import copy_html_resources
 
 def imgpath(img, img2, html):
 	"""
@@ -62,6 +64,9 @@ def html_log(self, outfile='$outdir/index.html', reference=None, h1='ISOLA-ObsPy
 
 	"""
 	outfile = outfile.replace('$outdir', self.outdir)
+	outfile_path = Path(outfile)
+	outfile_path.parent.mkdir(parents=True, exist_ok=True)
+	copy_html_resources(outfile_path.parent / 'html')
 	out = open(outfile, 'w')
 	plots = self.plots
 	plot_MT = imgpath(plot_MT, plots['MT'], outfile)

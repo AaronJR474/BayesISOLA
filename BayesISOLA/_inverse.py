@@ -49,6 +49,7 @@ def _invert_worker(task):
 		s["invert_displacement"], elemse_path,
 		covariance_factors=s["covariance_factors"],
 		data_whitened=s["data_whitened"],
+		green_dir=s["green_dir"],
 	)
  
 def run_inversion(self):
@@ -124,6 +125,7 @@ def run_inversion(self):
 			"invert_displacement": self.d.invert_displacement,
 			"covariance_factors": covariance_factors,
 			"data_whitened": data_whitened,
+			"green_dir": str(self.inp.green_dir),
 		}
 		with mp.Pool(processes=self.threads, initializer=_init_inversion_worker, initargs=(state, 1)) as pool:
 			progress_context = tqdm(total=len(todo), desc='Moment-tensor inversion', unit='pt') if show_progress else nullcontext()
@@ -138,7 +140,7 @@ def run_inversion(self):
 		output = []
 		indices = tqdm(todo, desc='Moment-tensor inversion', unit='pt') if show_progress else todo
 		for i in indices:
-			res = invert(grid[i]['id'], d_shifts, norm_d, Cd_inv, Cd_inv_shifts, self.inp.nr, self.d.components, self.inp.stations, self.d.npts_elemse, self.d.npts_slice, self.d.elemse_start_origin, self.inp.event['t'], self.d.samprate, self.deviatoric, self.decompose, self.d.invert_displacement, grid[i]['path'], covariance_factors=covariance_factors, data_whitened=data_whitened)
+			res = invert(grid[i]['id'], d_shifts, norm_d, Cd_inv, Cd_inv_shifts, self.inp.nr, self.d.components, self.inp.stations, self.d.npts_elemse, self.d.npts_slice, self.d.elemse_start_origin, self.inp.event['t'], self.d.samprate, self.deviatoric, self.decompose, self.d.invert_displacement, grid[i]['path'], covariance_factors=covariance_factors, data_whitened=data_whitened, green_dir=self.inp.green_dir)
 			output.append(res)
 	min_misfit = output[0]['misfit']
 	for i in todo:

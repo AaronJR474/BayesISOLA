@@ -22,7 +22,7 @@ def VR_of_components(self, n=1):
 	npts = self.d.npts_slice
 	has_covariance = bool(getattr(self.cova, 'has_covariance', False) or self.cova.Cd_inv or self.cova.Cd_inv_shifts)
 	data = self.d.data_shifts[self.centroid['shift_idx']]
-	elemse = read_elemse(self.inp.nr, self.d.npts_elemse, green_path('elemse'+self.centroid['id']+'.dat'), self.inp.stations, self.d.invert_displacement) # read elemse
+	elemse = read_elemse(self.inp.nr, self.d.npts_elemse, green_path(self.inp.green_dir, 'elemse'+self.centroid['id']+'.dat'), self.inp.stations, self.d.invert_displacement) # read elemse
 	for r in range(self.inp.nr):
 		for e in range(6):
 			my_filter(elemse[r][e], self.inp.stations[r]['fmin'], self.inp.stations[r]['fmax'])

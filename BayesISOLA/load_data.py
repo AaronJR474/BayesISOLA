@@ -3,6 +3,8 @@
 
 import os.path
 
+from BayesISOLA._paths import default_green_dir, prepare_green_workspace
+
 import warnings
 warnings.filterwarnings("ignore",category=DeprecationWarning)
 warnings.filterwarnings('ignore', '.*Conversion of the second argument of issubdtype from.*')
@@ -20,6 +22,8 @@ class load_data:
     :param outdir: a directory, where the outputs are saved (default 'output')
     :type output_mkdir: bool, optional
     :param output_mkdir: if ``True`` (default), creates a dir for output in case it does not exists
+    :type green_dir: string or path-like, optional
+    :param green_dir: writable Axitra workspace. By default, ``$outdir/green`` is used.
 	
     .. rubric:: _`Variables`
     
@@ -55,11 +59,12 @@ class load_data:
 	from BayesISOLA._mouse import detect_mouse
 	#from BayesISOLA._input_parameters import set_frequencies, set_working_sampling
 
-	def __init__(self, outdir='output', logfile='$outdir/log.txt', output_mkdir=True):
-		self.outdir = outdir
-		if not os.path.exists(outdir) and output_mkdir:
-			os.mkdir(outdir)
+	def __init__(self, outdir='output', logfile='$outdir/log.txt', output_mkdir=True, green_dir=None):
+		self.outdir = str(outdir)
+		if not os.path.exists(self.outdir) and output_mkdir:
+			os.mkdir(self.outdir)
 		self.logfile = open(logfile.replace('$outdir', self.outdir), 'w', 1)
+		self.green_dir = prepare_green_workspace(green_dir if green_dir is not None else default_green_dir(self.outdir))
 		self.data_raw = []
 		self.data_deltas = [] # list of ``stats.delta`` values of traces in ``self.data`` or ``self.data_raw``
 		self.logtext = {}

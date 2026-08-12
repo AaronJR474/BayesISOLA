@@ -7,7 +7,7 @@ from BayesISOLA._paths import green_path
 
 def read_crust(self, source, output=None):
 	"""
-	Copy a file or files with crustal model definition to location where code ``Axitra`` expects it
+	Copy one or more crustal-model files into the active Axitra workspace
 	
 	:param source: path to crust file
 	:type source: string
@@ -16,7 +16,7 @@ def read_crust(self, source, output=None):
 	"""
 	source = str(source)
 	if output is None:
-		output = str(green_path('crustal.dat'))
+		output = str(green_path(self.green_dir, 'crustal.dat'))
 	else:
 		output = str(output)
 	inputs = []
