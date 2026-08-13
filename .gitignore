@@ -21,3 +21,7 @@ output/
 filtrace.md
 
 BayesISOLA/_bin/
+.compat/
+.venv-release-sdist/
+.venv-release-win/
+wheelhouse/

@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-tests:
+    name: Source tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependency
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Reject SyntaxWarnings
+        run: PYTHONWARNINGS="error::SyntaxWarning" python -m compileall -q BayesISOLA tests examples docs
+
+      - name: Run source-level regression tests
+        run: >-
+          python -m pytest -q
+          tests/test_package_layout.py
+          tests/test_packaging_paths.py
+          tests/test_process_data_parameter_routing.py
+
+  sdist-check:
+    name: Source distribution check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build source distribution
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --sdist --outdir dist
+
+      - name: Verify source distribution
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              version = tomllib.load(f)["project"]["version"]
+
+          expected = Path("dist") / f"bayesisola-{version}.tar.gz"
+
+          if not expected.is_file():
+              raise SystemExit(f"Missing expected source distribution: {expected}")
+
+          print(expected)
+          PY

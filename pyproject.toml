@@ -29,7 +29,8 @@ test = ["pytest"]
 
 [project.urls]
 Repository = "https://github.com/AaronJR474/BayesISOLA"
-Upstream = "https://github.com/vackar/BayesISOLA"
+"Original repository" = "https://github.com/vackar/BayesISOLA"
+"Legacy documentation" = "https://geo.mff.cuni.cz/~vackar/BayesISOLA/"
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"

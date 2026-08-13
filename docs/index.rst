@@ -1,7 +1,7 @@
 BayesISOLA documentation
 ========================
 
-BayesISOLA is an open-source Python package for seismic source inversion using a point-source centroid moment tensor representation. This fork preserves the native BayesISOLA inversion and Axitra algorithms while adding automated workflows, reusable Green's-function utilities, model-specific Axitra support, multiprocessing improvements, and installable platform wheels.
+BayesISOLA is an independently maintained open-source Python package for seismic source inversion using a point-source centroid moment tensor representation. It preserves the original BayesISOLA inversion and Axitra algorithms while adding automated workflows, reusable Green's-function utilities, model-specific Axitra support, multiprocessing improvements, and installable platform wheels.
 
 The method is described in:
 
@@ -70,6 +70,17 @@ Automated workflow
 ------------------
 
 The automated centroid-moment-tensor workflow is available through ``BayesISOLA.workflows.run_auto_cmt``. Reusable velocity-model and Green's-function preparation utilities are provided by ``BayesISOLA.gf_helpers``. Axitra remains the default Green's-function backend; the corrected EarthScope Syngine backend is available through the workflow's explicit ``gf_source`` interface.
+
+Project history and attribution
+-------------------------------
+
+This repository is an independently maintained development derived from the
+original BayesISOLA project developed by Jiří Vackář and collaborators. The
+inherited Git history is preserved for scientific attribution and provenance.
+The original repository is `vackar/BayesISOLA
+<https://github.com/vackar/BayesISOLA>`_, and the original documentation and
+examples remain available through `Jiří Vackář's legacy BayesISOLA
+documentation <https://geo.mff.cuni.cz/~vackar/BayesISOLA/>`_.
 
 License
 -------

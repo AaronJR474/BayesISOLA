@@ -1,0 +1,458 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Check version and tag
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              version = tomllib.load(f)["project"]["version"]
+
+          print(f"BayesISOLA version: {version}")
+
+          if os.environ.get("GITHUB_REF_TYPE") == "tag":
+              actual = os.environ["GITHUB_REF_NAME"]
+              expected = f"v{version}"
+
+              if actual != expected:
+                  raise SystemExit(
+                      f"Tag/version mismatch: tag={actual}, expected={expected}"
+                  )
+          PY
+
+  sdist:
+    name: Build source distribution
+    needs: validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build source distribution
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --sdist --outdir dist
+
+      - name: Verify source distribution filename
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              version = tomllib.load(f)["project"]["version"]
+
+          expected = Path("dist") / f"bayesisola-{version}.tar.gz"
+
+          if not expected.is_file():
+              raise SystemExit(f"Missing expected source distribution: {expected}")
+
+          print(expected)
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  linux-wheel:
+    name: Build Linux manylinux wheel
+    needs: sdist
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-sdist
+          path: dist
+
+      - name: Build and repair manylinux wheel
+        run: |
+          mkdir -p wheelhouse/linux
+
+          docker run --rm \
+            -v "$PWD:/io" \
+            -w /io \
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -lc '
+          set -euo pipefail
+
+          if ! command -v gfortran >/dev/null 2>&1; then
+              dnf -y install gcc-gfortran || dnf -y install gcc-toolset-14-gcc-gfortran
+          fi
+
+          PY=/opt/python/cp312-cp312/bin/python
+
+          SDIST="$(find /io/dist -maxdepth 1 -type f -name "bayesisola-*.tar.gz" -print -quit)"
+          test -n "$SDIST"
+
+          "$PY" -m pip wheel --no-deps "$SDIST" -w /tmp/bayesisola-raw
+
+          RAW="$(find /tmp/bayesisola-raw -maxdepth 1 -type f -name "bayesisola-*.whl" -print -quit)"
+          test -n "$RAW"
+
+          auditwheel show "$RAW"
+
+          auditwheel repair \
+              --plat manylinux_2_28_x86_64 \
+              "$RAW" \
+              -w /io/wheelhouse/linux
+
+          REPAIRED="$(find /io/wheelhouse/linux -maxdepth 1 -type f -name "bayesisola-*.whl" -print -quit)"
+          test -n "$REPAIRED"
+
+          auditwheel show "$REPAIRED"
+          '
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-wheel
+          path: wheelhouse/linux/*.whl
+          if-no-files-found: error
+
+  windows-wheel:
+    name: Build Windows wheel
+    needs: sdist
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-sdist
+          path: dist
+
+      - name: Set up GNU Fortran
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc-fortran
+
+      - name: Add UCRT64 compiler to PATH
+        shell: pwsh
+        run: |
+          $ucrt = "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          $ucrt | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build Windows wheel from source distribution
+        shell: pwsh
+        run: |
+          gfortran --version
+
+          python -m pip install --upgrade pip
+
+          New-Item -ItemType Directory -Force "wheelhouse\windows" | Out-Null
+
+          $sdist = (
+              Get-ChildItem "dist\bayesisola-*.tar.gz" |
+              Select-Object -First 1
+          ).FullName
+
+          if (-not $sdist) {
+              throw "Source distribution not found."
+          }
+
+          python -m pip wheel --no-deps $sdist -w "wheelhouse\windows"
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Windows wheel build failed."
+          }
+
+          $wheel = (
+              Get-ChildItem "wheelhouse\windows\bayesisola-*-py3-none-win_amd64.whl" |
+              Select-Object -First 1
+          )
+
+          if (-not $wheel) {
+              throw "Expected py3-none-win_amd64 wheel was not produced."
+          }
+
+          Write-Host $wheel.FullName
+
+      - name: Verify packaged executables and runtime DLLs
+        shell: pwsh
+        run: |
+          $wheel = (
+              Get-ChildItem "wheelhouse\windows\bayesisola-*-py3-none-win_amd64.whl" |
+              Select-Object -First 1
+          ).FullName
+
+          $script = Join-Path $env:RUNNER_TEMP "check_wheel.py"
+
+          @'
+          import sys
+          import zipfile
+
+          required = {
+              "BayesISOLA/_bin/gr_xyz.exe",
+              "BayesISOLA/_bin/elemse.exe",
+              "BayesISOLA/_bin/libgcc_s_seh-1.dll",
+              "BayesISOLA/_bin/libgfortran-5.dll",
+              "BayesISOLA/_bin/libquadmath-0.dll",
+              "BayesISOLA/_bin/libwinpthread-1.dll",
+          }
+
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              names = set(z.namelist())
+
+          missing = sorted(required - names)
+
+          for name in sorted(required):
+              print(("FOUND   " if name in names else "MISSING ") + name)
+
+          if missing:
+              raise SystemExit(
+                  f"Missing packaged Windows runtime files: {missing}"
+              )
+          '@ | Set-Content -Encoding utf8 $script
+
+          python $script $wheel
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-wheel
+          path: wheelhouse/windows/*.whl
+          if-no-files-found: error
+
+  test-linux:
+    name: Linux wheel regression (Python ${{ matrix.python-version }})
+    needs: linux-wheel
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-linux-wheel
+          path: wheelhouse
+
+      - name: Install exact wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install wheelhouse/*.whl pytest
+
+      - name: Run source-free Axitra numerical regression
+        run: |
+          SMOKE="$RUNNER_TEMP/bayesisola-smoke"
+
+          rm -rf "$SMOKE"
+          mkdir -p "$SMOKE/tests/data" "$SMOKE/examples/input"
+
+          cp tests/test_axitra_numerical.py "$SMOKE/tests/"
+          cp tests/data/axitra_smoke_reference.npz "$SMOKE/tests/data/"
+          cp -a examples/input/example_2_SAC "$SMOKE/examples/input/"
+
+          cd "$SMOKE"
+
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          import BayesISOLA
+          from BayesISOLA._paths import axitra_executable
+
+          pkg = Path(BayesISOLA.__file__).resolve()
+          repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+
+          print("BayesISOLA:", pkg)
+          print("gr_xyz:", axitra_executable("gr_xyz"))
+          print("elemse:", axitra_executable("elemse"))
+
+          if repo == pkg or repo in pkg.parents:
+              raise SystemExit(
+                  "Imported BayesISOLA from the source checkout."
+              )
+          PY
+
+          python -m pytest -q tests/test_axitra_numerical.py
+
+  test-windows:
+    name: Windows wheel regression (Python ${{ matrix.python-version }})
+    needs: windows-wheel
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-windows-wheel
+          path: wheelhouse
+
+      - name: Install exact wheel
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+
+          $wheel = (
+              Get-ChildItem "wheelhouse\*.whl" |
+              Select-Object -First 1
+          ).FullName
+
+          if (-not $wheel) {
+              throw "Windows wheel not found."
+          }
+
+          python -m pip install $wheel pytest
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Wheel/dependency installation failed."
+          }
+
+      - name: Run source-free Axitra numerical regression
+        shell: pwsh
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP "bayesisola-smoke"
+
+          Remove-Item $smoke -Recurse -Force -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Force "$smoke\tests\data" | Out-Null
+          New-Item -ItemType Directory -Force "$smoke\examples\input" | Out-Null
+
+          Copy-Item "tests\test_axitra_numerical.py" "$smoke\tests\"
+          Copy-Item "tests\data\axitra_smoke_reference.npz" "$smoke\tests\data\"
+          Copy-Item "examples\input\example_2_SAC" "$smoke\examples\input\" -Recurse
+
+          $script = Join-Path $smoke "check_installed_wheel.py"
+
+          @'
+          import os
+          from pathlib import Path
+
+          import BayesISOLA
+          from BayesISOLA._paths import axitra_executable
+
+          pkg = Path(BayesISOLA.__file__).resolve()
+          repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+
+          print("BayesISOLA:", pkg)
+          print("gr_xyz:", axitra_executable("gr_xyz"))
+          print("elemse:", axitra_executable("elemse"))
+
+          if repo == pkg or repo in pkg.parents:
+              raise SystemExit(
+                  "Imported BayesISOLA from the source checkout."
+              )
+          '@ | Set-Content -Encoding utf8 $script
+
+          Push-Location $smoke
+
+          try {
+              python $script
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Installed-wheel import check failed."
+              }
+
+              python -m pytest -q tests\test_axitra_numerical.py
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Numerical regression failed."
+              }
+          }
+          finally {
+              Pop-Location
+          }
+
+  release:
+    name: Publish GitHub release
+    if: ${{ github.ref_type == 'tag' }}
+    needs:
+      - sdist
+      - linux-wheel
+      - windows-wheel
+      - test-linux
+      - test-windows
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release-dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Create checksums
+        run: |
+          cd release-dist
+          sha256sum *.tar.gz *.whl > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+
+              gh release upload "$GITHUB_REF_NAME" \
+                  release-dist/*.tar.gz \
+                  release-dist/*.whl \
+                  release-dist/SHA256SUMS.txt \
+                  --clobber \
+                  --repo "$GITHUB_REPOSITORY"
+          else
+              gh release create "$GITHUB_REF_NAME" \
+                  release-dist/*.tar.gz \
+                  release-dist/*.whl \
+                  release-dist/SHA256SUMS.txt \
+                  --verify-tag \
+                  --generate-notes \
+                  --title "BayesISOLA $GITHUB_REF_NAME" \
+                  --repo "$GITHUB_REPOSITORY"
+          fi
