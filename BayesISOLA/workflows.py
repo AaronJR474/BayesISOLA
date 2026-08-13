@@ -2853,7 +2853,6 @@ def plot_cmt_summary(
     # behavior explicit and use the same tensor for the plotted principal axes.
     mt_plot = mt.copy()
     mt_plot[:3] -= np.mean(mt_plot[:3])
-    plot_zerotrace = True
 
     if tensor_mode == "deviatoric":
         tensor_label = "Deviatoric (5-component)"
@@ -2880,7 +2879,6 @@ def plot_cmt_summary(
         facecolor=facecolor,
         bgcolor=bgcolor,
         edgecolor="black",
-        plot_zerotrace=plot_zerotrace,
         zorder=1,
     )
     ax_ball.add_collection(ball)
