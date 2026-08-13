@@ -7,7 +7,7 @@ import string
 from pyproj import Geod
 
 def set_grid(self, min_depth=1000):
-	"""
+	r"""
 	Generates grid ``self.grid`` of points, where the inverse problem will be solved.
 	`Rupture length` is estimated as :math:`111 \cdot 10^{M_W}`.
 	Horizontal diameter of the grid is determined as ``self.location_unc`` + `rupture_length`.

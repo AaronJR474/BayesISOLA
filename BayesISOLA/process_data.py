@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 class process_data:
-	"""
+	r"""
     Process data for MT inversion.
     
     :param data: instance with raw data (event and seismograms)
@@ -25,7 +25,7 @@ class process_data:
 	:param fmax: maximal inverted frequency for all stations
 	:type fmax: float, optional
 	:param fmin: minimal inverted frequency for all stations
-	:type fmax: float, optional
+	:type fmin: float, optional
 	:parameter min_depth: minimal grid point depth in meters
 	:type min_depth: float, optional
     :param skip_short_records: if not ``False``, run :func:`skip_short_records` with the value of the parameter
@@ -104,9 +104,9 @@ class process_data:
 		if correct_data:
 			self.correct_data()
 		if set_parameters:
-			self.set_parameters(fmax, fmin, min_depth)
-		if not skip_short_records is False:
-			self.skip_short_records(noise=True)
+			self.set_parameters(fmax=fmax, fmin=fmin, min_depth=min_depth)
+		if skip_short_records is not False:
+			self.skip_short_records(noise=skip_short_records)
 		if calculate_or_verify_Green:
 			self.calculate_or_verify_Green()
 		if trim_filter_data:

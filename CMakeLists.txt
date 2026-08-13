@@ -19,3 +19,16 @@ target_include_directories(gr_xyz PRIVATE "${AXITRA_SOURCE_DIR}")
 target_include_directories(elemse PRIVATE "${AXITRA_SOURCE_DIR}")
 
 install(TARGETS gr_xyz elemse RUNTIME DESTINATION BayesISOLA/_bin)
+
+if(WIN32 AND CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+    get_filename_component(GFORTRAN_BIN_DIR "${CMAKE_Fortran_COMPILER}" DIRECTORY)
+
+    install(
+        FILES
+            "${GFORTRAN_BIN_DIR}/libgcc_s_seh-1.dll"
+            "${GFORTRAN_BIN_DIR}/libgfortran-5.dll"
+            "${GFORTRAN_BIN_DIR}/libquadmath-0.dll"
+            "${GFORTRAN_BIN_DIR}/libwinpthread-1.dll"
+        DESTINATION BayesISOLA/_bin
+    )
+endif()

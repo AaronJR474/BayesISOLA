@@ -141,7 +141,7 @@ def plot_covariance_matrix(self, outfile='$outdir/covariance_matrix.png', normal
 
 	if colorbar:
 		#cbar = plt.colorbar(cax, shrink=0.6, label='correlation [$\mathrm{m}^2\,\mathrm{s}^{-2}$]')
-		cbar = plt.colorbar(cax, shrink=0.6, label='correlation [$\mathrm{mm}^2$]') # TODO
+		cbar = plt.colorbar(cax, shrink=0.6, label=r'correlation [$\mathrm{mm}^2$]') # TODO
 
 		#cbar = plt.colorbar(cax, ticks=[-mx, 0, mx])
 

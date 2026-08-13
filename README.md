@@ -1,10 +1,26 @@
 # BayesISOLA
 
-BayesISOLA is a Python implementation of centroid moment-tensor inversion based on the Bayesian ISOLA methodology. This fork retains the existing inversion and Axitra algorithms while adding automated workflows, reusable Green's-function helpers, model-specific Axitra support, improved multiprocessing, and install-time compilation of the bundled Axitra Fortran programs.
+BayesISOLA is a Python package for centroid moment-tensor inversion based on the Bayesian ISOLA methodology of Vackář et al. (2017). This fork preserves the native BayesISOLA inversion and Axitra Green's-function algorithms while adding automated workflows, reusable Green's-function utilities, model-specific Axitra support, multiprocessing improvements, and installable platform wheels.
 
-## Installation from source
+## Installation
 
-The source installation builds the bundled `gr_xyz` and `elemse` Fortran programs automatically with CMake through `scikit-build-core`. A working Fortran compiler is therefore required when installing directly from Git.
+BayesISOLA requires Python 3.10 or newer.
+
+### Binary wheels
+
+Release wheels are built for Linux x86_64 and Windows x86_64. The wheels contain the compiled Axitra `gr_xyz` and `elemse` executables, so a Fortran compiler is not required at runtime when installing a release wheel.
+
+Install a downloaded wheel with:
+
+```bash
+python -m pip install /path/to/bayesisola-<version>-<platform>.whl
+```
+
+The Linux wheel vendors the required non-system Fortran runtime libraries during the manylinux repair step. The Windows wheel installs the required MinGW runtime DLLs beside `gr_xyz.exe` and `elemse.exe` under `BayesISOLA/_bin` so the Axitra programs can run without MinGW on `PATH`.
+
+### Installation from source
+
+Source and Git installations compile the bundled Axitra Fortran programs automatically through CMake and `scikit-build-core`. A working GNU Fortran compiler is therefore required.
 
 On Ubuntu/WSL:
 
@@ -20,13 +36,27 @@ From a local checkout:
 python -m pip install .
 ```
 
-No manual compilation inside a repository `green/` directory is required. The compiled Axitra executables are installed under `BayesISOLA/_bin`, while every inversion uses its own writable Green's-function workspace under `<outdir>/green` by default.
+On Windows, source installation requires a GNU Fortran/MinGW toolchain available to CMake. No manual compilation inside a repository `green/` directory is required.
 
-Pre-built platform wheels are intentionally not configured yet; Linux/WSL and Windows wheel production will be handled separately after the source package is stable.
+## Axitra runtime layout
+
+The immutable Axitra build sources are kept under:
+
+```text
+fortran/axitra/
+```
+
+Installed Axitra executables are kept under:
+
+```text
+BayesISOLA/_bin/
+```
+
+Every inversion uses a separate writable Green's-function workspace under `<outdir>/green` by default. Mutable files such as `crustal.dat`, `station.dat`, `grdat*.hed`, `gr*.hea`, `gr*.hes`, and `elemse*.dat` are written only to that event-specific workspace. A different writable workspace can be supplied with `green_dir=`.
 
 ## Core interface
 
-The historical interface is preserved:
+The historical BayesISOLA interface is preserved:
 
 ```python
 import BayesISOLA
@@ -37,8 +67,6 @@ inputs.set_source_time_function("triangle", 2.0)
 inputs.read_network_coordinates("network.stn")
 inputs.read_crust("crustal.dat")
 ```
-
-`load_data` now creates an event-specific Axitra workspace at `<outdir>/green`. A different writable workspace can be supplied with `green_dir=` when required.
 
 ## Automated workflow
 
@@ -54,9 +82,11 @@ Reusable velocity-model and Green's-function preparation utilities are available
 from BayesISOLA import gf_helpers
 ```
 
+The automated workflow retains Axitra as the default Green's-function backend and also supports the corrected EarthScope Syngine backend through its explicit `gf_source` interface.
+
 ## Examples
 
-The repository examples use paths relative to their own files, so they can be launched from any working directory in a source checkout:
+The repository examples resolve their input and output paths relative to the script location and can therefore be launched from any working directory in a source checkout:
 
 ```bash
 python examples/example_2_SAC.py
@@ -73,12 +103,10 @@ BayesISOLA/resources/       Runtime static resources
 fortran/axitra/             Axitra Fortran build sources
 examples/                   Runnable examples and example inputs
 docs/                       Sphinx documentation
-tests/                      Packaging and path regression tests
-CMakeLists.txt               Axitra build definition
-pyproject.toml               Python build and package metadata
+tests/                      Packaging, path, and numerical regression tests
+CMakeLists.txt              Axitra build definition
+pyproject.toml              Python build and package metadata
 ```
-
-The installed package contains the Python sources, runtime resources, and compiled Axitra executables. Mutable Axitra files such as `crustal.dat`, `station.dat`, `grdat*.hed`, and `elemse*.dat` are written only to the event-specific workspace.
 
 ## Reference
 
@@ -86,4 +114,4 @@ J. Vackář, J. Burjánek, F. Gallovič, J. Zahradník, and J. Clinton (2017), *
 
 ## License
 
-The repository `LICENSE` file contains the GNU General Public License, version 3.
+The repository distributes the GNU General Public License, version 3 text in `LICENSE`.

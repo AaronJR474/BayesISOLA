@@ -10,7 +10,7 @@ from obspy.geodetics.base import gps2dist_azimuth
 from BayesISOLA._paths import green_path
 
 def read_network_info_DB(self, db, host, port=-1, user=None, password=None, min_distance=None, max_distance=None):
-	"""
+	r"""
 	Reads station coordinates from `SeisComp3` database.
 	Calculate their distances and azimuthes using WGS84 elipsoid.
 	Create data structure ``self.stations``. Sorts it according to station epicentral distance.
@@ -85,7 +85,7 @@ def read_network_info_DB(self, db, host, port=-1, user=None, password=None, min_
 	self.models[''] = 0
 
 def read_network_coordinates(self, filename, network='', location='', channelcode='LH', min_distance=None, max_distance=None, max_n_of_stations=None):
-	"""
+	r"""
 	Read informations about stations from file in ISOLA format.
 	Calculate their distances and azimuthes using WGS84 elipsoid.
 	Create data structure ``self.stations``. Sorts it according to station epicentral distance.

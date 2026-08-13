@@ -1,7 +1,7 @@
 BayesISOLA documentation
 ========================
 
-BayesISOLA is an open-source Python package for seismic source inversion using a point-source centroid moment tensor representation.
+BayesISOLA is an open-source Python package for seismic source inversion using a point-source centroid moment tensor representation. This fork preserves the native BayesISOLA inversion and Axitra algorithms while adding automated workflows, reusable Green's-function utilities, model-specific Axitra support, multiprocessing improvements, and installable platform wheels.
 
 The method is described in:
 
@@ -33,7 +33,11 @@ Geophysical Journal International, 210(2), 693--705.
 Installation
 ------------
 
-Source installations compile the bundled Axitra Fortran programs automatically through CMake and ``scikit-build-core``. A Fortran compiler is required when installing directly from source or Git.
+Binary release wheels are built for Linux x86_64 and Windows x86_64. They contain the compiled Axitra executables, so a Fortran compiler is not required at runtime when installing a release wheel. A downloaded wheel can be installed with::
+
+   python -m pip install /path/to/bayesisola-<version>-<platform>.whl
+
+Source and Git installations compile the bundled Axitra Fortran programs automatically through CMake and ``scikit-build-core`` and therefore require a working GNU Fortran compiler.
 
 On Ubuntu/WSL::
 
@@ -45,12 +49,14 @@ From a local checkout::
 
    python -m pip install .
 
-The compiled ``gr_xyz`` and ``elemse`` executables are installed inside the Python package. Mutable Axitra inputs and Green's-function outputs are kept in an event-specific ``<outdir>/green`` workspace by default.
+On Windows, source installation requires a GNU Fortran/MinGW toolchain available to CMake.
+
+The installed ``gr_xyz`` and ``elemse`` executables live under ``BayesISOLA/_bin``. Mutable Axitra inputs and Green's-function outputs are kept in an event-specific ``<outdir>/green`` workspace by default.
 
 Requirements
 ------------
 
-Runtime Python dependencies are declared in ``pyproject.toml`` and installed by pip. The main scientific dependencies include NumPy, SciPy, matplotlib, ObsPy, pyproj, pandas, and requests. ``tqdm`` and ``threadpoolctl`` are included for progress reporting and multiprocessing control.
+BayesISOLA requires Python 3.10 or newer. Runtime Python dependencies are declared in ``pyproject.toml`` and installed by pip. The main scientific dependencies include NumPy, SciPy, matplotlib, ObsPy, pyproj, pandas, and requests. ``tqdm`` and ``threadpoolctl`` are included for progress reporting and multiprocessing control.
 
 Examples
 --------
@@ -63,12 +69,12 @@ All inputs required by the SAC example are included under ``examples/input``. In
 Automated workflow
 ------------------
 
-The automated centroid-moment-tensor workflow is available through ``BayesISOLA.workflows.run_auto_cmt``. Reusable velocity-model and Green's-function preparation utilities are provided by ``BayesISOLA.gf_helpers``.
+The automated centroid-moment-tensor workflow is available through ``BayesISOLA.workflows.run_auto_cmt``. Reusable velocity-model and Green's-function preparation utilities are provided by ``BayesISOLA.gf_helpers``. Axitra remains the default Green's-function backend; the corrected EarthScope Syngine backend is available through the workflow's explicit ``gf_source`` interface.
 
 License
 -------
 
-The repository ``LICENSE`` file contains the GNU General Public License, version 3.
+The repository distributes the GNU General Public License, version 3 text in ``LICENSE``.
 
 Module summary
 --------------

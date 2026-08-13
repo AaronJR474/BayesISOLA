@@ -16,7 +16,7 @@ from BayesISOLA._paths import axitra_executable, green_path
 def Axitra_wrapper(i, model, x, y, z, npts_exp, elemse_start_origin,
                    logfile='output/log_green.txt', green_dir=None,
                    gr_xyz_executable=None, elemse_executable=None):
-    """
+    r"""
     Evaluate Green's function using ``Axitra`` code (programs ``gr_xyz`` and ``elemse``) in a given grid point.
 
     :param i: number (identifier) of grid point

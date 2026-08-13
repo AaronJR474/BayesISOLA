@@ -7,7 +7,7 @@ from obspy import UTCDateTime
 from BayesISOLA._paths import green_path
 
 def read_event_info(self, filename):
-	"""
+	r"""
 	Read event coordinates, magnitude, and time from a file in specified format (see below)
 	
 	:param filename: path to file
@@ -54,7 +54,7 @@ def read_event_info(self, filename):
 	self.rupture_length = math.sqrt(111 * 10**self.event['mag'])		# M6 ~ 111 km2, M5 ~ 11 km2 		REFERENCE NEEDED
 
 def set_event_info(self, lat, lon, depth, mag, t, agency=''):
-	"""
+	r"""
 	Sets event coordinates, magnitude, and time from parameters given to this function
 	
 	:param lat: event latitude

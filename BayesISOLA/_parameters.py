@@ -7,7 +7,7 @@ import numpy as np
 from BayesISOLA.helpers import lcmm, next_power_of_2
 
 def set_frequencies(self, fmax, fmin=0., wavelengths=5):
-	"""
+	r"""
 	Sets frequency range for each station according its distance.
 	
 	:type fmax: float
@@ -110,7 +110,7 @@ def min_time(self, distance, mag=0):
 	self.t_min = 0		# FIXED OPTION, because Green's functions with beginning in non-zero time are nou implemented yet
 
 def max_time(self, distance, mag=0):
-	"""
+	r"""
 	Defines the end of inversion time window in seconds from location origin time. Calculates it as :math:`\mathrm{distance} / v`.
 	Save it into ``self.t_max``.
 	
@@ -125,7 +125,7 @@ def max_time(self, distance, mag=0):
 	self.t_max = t
 
 def set_time_window(self):
-	"""
+	r"""
 	Determines number of samples for inversion (``self.npts_slice``) and for Green's function calculation (``self.npts_elemse`` and ``self.npts_exp``) from ``self.min_time`` and ``self.max_time``.
 	
 	:math:`\mathrm{npts\_slice} \le \mathrm{npts\_elemse} = 2^{\mathrm{npts\_exp}} < 2\cdot\mathrm{npts\_slice}`
