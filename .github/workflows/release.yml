@@ -2,6 +2,11 @@ name: Build and Release
 
 on:
   workflow_dispatch:
+    inputs:
+      pypi_tag:
+        description: "Existing GitHub release tag to publish to PyPI (e.g. v0.1.0); leave blank for a normal dry run"
+        required: false
+        type: string
   push:
     tags:
       - "v*"
@@ -490,3 +495,68 @@ jobs:
                   --title "BayesISOLA $GITHUB_REF_NAME" \
                   --repo "$GITHUB_REPOSITORY"
           fi
+
+  # Normal publication path for all future tagged releases.
+  # Uses the exact distributions built and regression-tested in this workflow.
+  pypi-publish:
+    name: Publish distributions to PyPI
+    if: ${{ github.ref_type == 'tag' }}
+    needs:
+      - release
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/BayesISOLA
+
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download tested distributions
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+
+  # One-time/bootstrap path for a GitHub Release that already exists.
+  # This lets v0.1.0 be published without moving or recreating its tag.
+  pypi-bootstrap:
+    name: Publish existing GitHub release to PyPI
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.pypi_tag != '' }}
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/BayesISOLA
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download exact GitHub release distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYPI_TAG: ${{ inputs.pypi_tag }}
+        run: |
+          mkdir -p dist
+
+          gh release download "$PYPI_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir dist \
+              --pattern 'bayesisola-*.whl' \
+              --pattern 'bayesisola-*.tar.gz'
+
+          echo "Files that will be published to PyPI:"
+          find dist -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
