@@ -1,3 +1,4 @@
+![Cover](https://github.com/AaronJR474/BayesISOLA/blob/master/examples/2026p530771/figures/cmt_summary.png)
 # BayesISOLA
 
 BayesISOLA is an independently maintained Python package for centroid moment-tensor inversion based on the Bayesian ISOLA methodology of Vackář et al. (2017). The original BayesISOLA inversion and Axitra algorithms are retained, while the maintained version adds modern packaging, automated inversion workflows, reusable velocity-model and Green's-function utilities, improved results handling, and tested binary distributions for current Python versions.
