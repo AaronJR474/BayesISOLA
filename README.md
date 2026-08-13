@@ -95,6 +95,8 @@ python examples/example_2_fdsnws.py
 
 The SAC example includes its waveform and response files under `examples/input/example_2_SAC`.
 
+The notebook `examples/run_auto_cmt_example.ipynb` provides a worked example of the `run_auto_cmt` workflow, including the available velocity-model choices and their use in an automated CMT inversion.
+
 ## Repository layout
 
 ```text
