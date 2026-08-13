@@ -52,7 +52,18 @@ def _run_axitra_case(output_root):
     assert len(grid.grid) == 1
     point = grid.grid[0]
     elemse_file = Path(inputs.green_dir) / "elemse0000.dat"
-    assert elemse_file.is_file()
+
+    if not elemse_file.is_file():
+        log_file = Path(inputs.outdir) / "log_green.txt"
+        log_text = (
+            log_file.read_text(encoding="utf-8", errors="replace")
+            if log_file.is_file()
+            else "<log_green.txt was not created>"
+        )
+        pytest.fail(
+            f"Axitra did not create {elemse_file}.\n"
+            f"Axitra log:\n{log_text}"
+        )
 
     elemse = read_elemse(
         inputs.nr,
