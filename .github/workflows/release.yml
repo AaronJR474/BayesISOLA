@@ -152,19 +152,43 @@ jobs:
           name: release-sdist
           path: dist
 
-      - name: Set up GNU Fortran
-        id: msys2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: mingw-w64-ucrt-x86_64-gcc-fortran
-
-      - name: Add UCRT64 compiler to PATH
+      - name: Set up pinned WinLibs GNU Fortran 13.2.0
         shell: pwsh
         run: |
-          $ucrt = "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
-          $ucrt | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/13.2.0posix-18.1.5-11.0.1-ucrt-r8/winlibs-x86_64-posix-seh-gcc-13.2.0-mingw-w64ucrt-11.0.1-r8.zip"
+          $archive = Join-Path $env:RUNNER_TEMP "winlibs-gcc-13.2.0-r8.zip"
+          $root = Join-Path $env:RUNNER_TEMP "winlibs-gcc-13.2.0-r8"
+
+          curl.exe -L --fail --retry 5 --retry-delay 2 -o $archive $url
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to download pinned WinLibs toolchain."
+          }
+
+          Expand-Archive -Path $archive -DestinationPath $root -Force
+
+          $bin = Join-Path $root "mingw64\bin"
+          $gfortran = Join-Path $bin "gfortran.exe"
+
+          if (-not (Test-Path $gfortran)) {
+              throw "Pinned WinLibs gfortran.exe was not found."
+          }
+
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "FC=$gfortran" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "=== PINNED WINDOWS FORTRAN TOOLCHAIN ==="
+          & $gfortran --version
+          & $gfortran -dumpmachine
+
+          $ninja = Join-Path $bin "ninja.exe"
+
+          if (-not (Test-Path $ninja)) {
+              throw "Pinned WinLibs ninja.exe was not found."
+          }
+
+          & $ninja --version
 
       - name: Build Windows wheel from source distribution
         shell: pwsh
