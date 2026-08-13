@@ -51,7 +51,82 @@ def _invert_worker(task):
 		data_whitened=s["data_whitened"],
 		green_dir=s["green_dir"],
 	)
- 
+
+
+def _shift_log_det_ca(shift_entry):
+	"""Return the log determinant of one shift covariance, or ``-inf``."""
+	log_det = shift_entry.get("log_det_Ca")
+	if log_det is not None:
+		log_det = float(log_det)
+		return log_det if np.isfinite(log_det) else -np.inf
+
+	matrix = shift_entry.get("GtGinv")
+	if matrix is not None:
+		sign, log_det = np.linalg.slogdet(np.asarray(matrix, dtype=float))
+		if sign > 0 and np.isfinite(log_det):
+			return float(log_det)
+
+	det = float(shift_entry.get("det_Ca", np.nan))
+	if np.isfinite(det) and det > 0.0:
+		return float(np.log(det))
+	return -np.inf
+
+
+def _assign_posterior_weights(self, todo):
+	"""Assign numerically stable relative posterior weights to all shifts.
+
+	The PPD is only defined up to a common multiplicative constant.  We therefore
+	construct the weights in log space, subtract the largest finite log weight,
+	and exponentiate only the normalized values.  This preserves all normalized
+	posterior probabilities while preventing overflow in ``sqrt(det(Ca))*exp``.
+	"""
+	finite_misfits = [
+		float(GP["misfit"])
+		for i in todo
+		for GP in self.grid[i]["shifts"].values()
+		if np.isfinite(GP["misfit"])
+	]
+	if not finite_misfits:
+		raise RuntimeError("No finite misfit values are available for posterior weighting.")
+
+	misfit_ref = min(finite_misfits)
+	log_weights = []
+	for i in todo:
+		for GP in self.grid[i]["shifts"].values():
+			misfit = float(GP["misfit"])
+			log_det = _shift_log_det_ca(GP)
+			if np.isfinite(misfit) and np.isfinite(log_det):
+				log_c = 0.5 * log_det - 0.5 * (misfit - misfit_ref)
+			else:
+				log_c = -np.inf
+			GP["_log_c"] = float(log_c)
+			if np.isfinite(log_c):
+				log_weights.append(float(log_c))
+
+	if not log_weights:
+		raise RuntimeError(
+			"No finite posterior weights could be constructed from the "
+			"grid-point covariance matrices and misfits."
+		)
+
+	log_c_max = max(log_weights)
+	self.max_sum_c = self.max_c = self.sum_c = 0.0
+	for i in todo:
+		gp = self.grid[i]
+		gp["sum_c"] = 0.0
+		for GP in gp["shifts"].values():
+			log_c = GP.pop("_log_c")
+			GP["c"] = float(np.exp(log_c - log_c_max)) if np.isfinite(log_c) else 0.0
+			gp["sum_c"] += GP["c"]
+		gp["c"] = gp["shifts"][gp["shift_idx"]]["c"]
+		self.sum_c += gp["sum_c"]
+		self.max_c = max(self.max_c, gp["c"])
+		self.max_sum_c = max(self.max_sum_c, gp["sum_c"])
+
+	if not np.isfinite(self.sum_c) or self.sum_c <= 0.0:
+		raise RuntimeError("Posterior grid weights could not be normalized to a positive finite value.")
+
+
 def run_inversion(self):
 	"""
 	Runs function :func:`invert` in parallel.
@@ -148,28 +223,13 @@ def run_inversion(self):
 		for i in indices:
 			res = invert(grid[i]['id'], d_shifts, norm_d, Cd_inv, Cd_inv_shifts, self.inp.nr, self.d.components, self.inp.stations, self.d.npts_elemse, self.d.npts_slice, self.d.elemse_start_origin, self.inp.event['t'], self.d.samprate, self.deviatoric, self.decompose, self.d.invert_displacement, grid[i]['path'], covariance_factors=covariance_factors, data_whitened=data_whitened, green_dir=self.inp.green_dir)
 			output.append(res)
-	min_misfit = output[0]['misfit']
 	for i in todo:
 		grid[i].update(output[todo.index(i)])
 		grid[i]['shift_idx'] = grid[i]['shift']
 		#grid[i]['shift'] = self.g.shift_min + grid[i]['shift']*self.g.SHIFT_step/self.d.max_samprate
 		grid[i]['shift'] = self.d.shifts[grid[i]['shift']]
-		min_misfit = min(min_misfit, grid[i]['misfit'])
-	self.max_sum_c = self.max_c = self.sum_c = 0
-	for i in todo:
-		gp = grid[i]
-		gp['sum_c'] = 0
-		for idx in gp['shifts']:
-			GP = gp['shifts'][idx]
-			if gp['det_Ca'] == np.inf:
-				GP['c'] = 0
-			else:
-				GP['c'] = np.sqrt(gp['det_Ca']) * np.exp(-0.5 * (GP['misfit']-min_misfit))
-			gp['sum_c'] += GP['c']
-		gp['c'] = gp['shifts'][gp['shift_idx']]['c']
-		self.sum_c += gp['sum_c']
-		self.max_c = max(self.max_c, gp['c'])
-		self.max_sum_c = max(self.max_sum_c, gp['sum_c'])
+
+	_assign_posterior_weights(self, todo)
 
 def find_best_grid_point(self):
 	"""

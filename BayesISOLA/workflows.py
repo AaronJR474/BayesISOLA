@@ -3099,6 +3099,7 @@ def run_auto_cmt(
     freqmin: float = 0.02,
     freqmax: float = 0.05,
     threads: int = 2,
+    progress: bool = True,
     invert_displacement: bool = False,
     use_precalculated_Green: bool | str = "auto",
     covariance: str = "noise",
@@ -3188,6 +3189,12 @@ def run_auto_cmt(
     the unsuffixed base model. The numerical Axitra calculation itself remains
     native: model-specific ``crustal-<model>.dat`` and ``station-<model>.dat``
     files are passed to the existing ``gr_xyz``/``elemse`` programs.
+
+    Progress reporting
+    ------------------
+    ``progress`` controls the native BayesISOLA progress bars used for Axitra
+    Green's-function calculation and moment-tensor inversion.  Syngine retains
+    its backend-specific ``gf_options['progress']`` control.
 
     Station radius and waveforms
     ----------------------------
@@ -3426,7 +3433,7 @@ def run_auto_cmt(
 
     use_noise = covariance == "noise"
     data = BayesISOLA.process_data(
-        inputs, grid, threads=int(threads),
+        inputs, grid, threads=int(threads), progress=bool(progress),
         invert_displacement=bool(invert_displacement),
         use_precalculated_Green=use_precalculated_Green,
         velocity_ot_the_slowest_wave=float(velocity_slowest_m_s),

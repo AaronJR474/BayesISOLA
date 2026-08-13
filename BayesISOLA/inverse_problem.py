@@ -15,6 +15,30 @@ from BayesISOLA.MT_comps import decompose, a2mt
 from BayesISOLA._paths import green_path
 
 
+def _covariance_determinant_metrics(matrix):
+    """Return a finite-log determinant and a backward-compatible determinant.
+
+    ``GtGinv`` is a covariance matrix and should therefore have a positive
+    determinant.  ``slogdet`` keeps the logarithm numerically stable even when
+    the determinant itself would overflow or underflow in floating point.
+    """
+    sign, log_det = np.linalg.slogdet(np.asarray(matrix, dtype=float))
+    if sign <= 0 or not np.isfinite(log_det):
+        return np.nan, -np.inf
+
+    log_det = float(log_det)
+    log_max = float(np.log(np.finfo(float).max))
+    log_min = float(np.log(np.nextafter(0.0, 1.0)))
+
+    if log_det > log_max:
+        det = np.inf
+    elif log_det < log_min:
+        det = 0.0
+    else:
+        det = float(np.exp(log_det))
+    return det, log_det
+
+
 def whiten_covariance_array(values, covariance_factors, stations, npts):
     """Apply BayesISOLA's stored covariance whitening factors block-by-block.
 
@@ -111,7 +135,7 @@ def invert(point_id, d_shifts, norm_d, Cd_inv, Cd_inv_shifts, nr, comps, station
         GtG = np.dot(Gt, G_work)
         CN = np.sqrt(np.linalg.cond(GtG))
         GtGinv = np.linalg.inv(GtG)
-        det_Ca = np.linalg.det(GtGinv)
+        det_Ca, log_det_Ca = _covariance_determinant_metrics(GtGinv)
 
     res = {}
     for shift in range(len(d_shifts)):
@@ -152,7 +176,7 @@ def invert(point_id, d_shifts, norm_d, Cd_inv, Cd_inv_shifts, nr, comps, station
                 GtG = np.dot(Gt, G)
                 CN = np.sqrt(np.linalg.cond(GtG))
                 GtGinv = np.linalg.inv(GtG)
-                det_Ca = np.linalg.det(GtGinv)
+                det_Ca, log_det_Ca = _covariance_determinant_metrics(GtGinv)
 
             Gtd = np.dot(Gt, d_shift)
             a = np.dot(GtGinv, Gtd)
@@ -185,6 +209,7 @@ def invert(point_id, d_shifts, norm_d, Cd_inv, Cd_inv_shifts, nr, comps, station
             'CN': CN,
             'GtGinv': GtGinv,
             'det_Ca': det_Ca,
+            'log_det_Ca': log_det_Ca,
         }
 
     shift = max(res, key=lambda s: res[s]['VR'])
@@ -196,6 +221,7 @@ def invert(point_id, d_shifts, norm_d, Cd_inv, Cd_inv_shifts, nr, comps, station
         'CN': res[shift]['CN'],
         'GtGinv': res[shift]['GtGinv'],
         'det_Ca': res[shift]['det_Ca'],
+        'log_det_Ca': res[shift]['log_det_Ca'],
         'shifts': res,
     }
     if decomp:
