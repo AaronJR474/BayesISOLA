@@ -1,0 +1,2 @@
+n_requested,n_allocated,n_sampled,allocation_difference,n_space_time_cells_used,n_grid_points_used,n_time_shifts_used,spatially_degenerate,temporally_degenerate,degenerate_allocation,note
+1000,1000,1000,0,1,1,1,True,True,True,All returned realizations occupy one discrete space-time cell. Location/time columns therefore repeat exactly; mechanism spread is conditional on that cell's GtGinv covariance.

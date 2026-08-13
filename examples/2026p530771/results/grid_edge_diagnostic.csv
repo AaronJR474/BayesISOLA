@@ -1,0 +1,2 @@
+realized_radius_km,realized_step_x_km,realized_step_z_km,realized_depth_range_km,n_depth_levels_realized,n_steps_horizontal,centroid_edge_reasons
+9.389911291082324,2.1820492274069356,1.0910246137034678,"(18.97012535976565, 111.7072175245604)",86,4,"['horizontal index at max (i=0, j=-4, n_steps=4); driven by location_unc + rupture_length, not depth']"

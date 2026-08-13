@@ -1,0 +1,110 @@
+
+Hypocenter location:
+  Agency: 
+  Origin time: 2026-07-16 09:14:54
+  Lat  -45.039   Lon  167.682   Depth37.5 km
+Station coordinates: 2026p530771\input\network.stn
+Crustal model(s): 2026p530771\input\crustal.dat
+
+Mouse detection:
+  MSZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:    5.6 s, amplitude:   5.32e-05 m s^-2, fit:    0.92)
+  MSZ HHN: MOUSE detected, ignoring component in inversion (time of onset:    6.1 s, amplitude:   7.71e-05 m s^-2, fit:    0.94)
+  MSZ HHE: MOUSE detected, ignoring component in inversion (time of onset:    5.6 s, amplitude:   2.04e-04 m s^-2, fit:    0.93)
+  MLZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   24.9 s, amplitude:   4.39e-06 m s^-2, fit:    0.96)
+  MLZ HHE: MOUSE detected, ignoring component in inversion (time of onset:   19.9 s, amplitude:   7.83e-06 m s^-2, fit:    0.96)
+  OPZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   79.2 s, amplitude:   6.17e-07 m s^-2, fit:    0.62)
+  WHSZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   13.4 s, amplitude:   8.67e-07 m s^-2, fit:    0.84)
+  WHSZ HHN: MOUSE detected, ignoring component in inversion (time of onset:  155.4 s, amplitude:   9.38e-07 m s^-2, fit:    0.62)
+  WVZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   23.3 s, amplitude:   3.24e-05 m s^-2, fit:    0.89)
+  WVZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   23.0 s, amplitude:   3.95e-05 m s^-2, fit:    0.89)
+  WVZ HHE: MOUSE detected, ignoring component in inversion (time of onset:   23.3 s, amplitude:   2.29e-05 m s^-2, fit:    0.89)
+  INZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   34.8 s, amplitude:   1.39e-07 m s^-2, fit:    0.85)
+  INZ HHE: MOUSE detected, ignoring component in inversion (time of onset:  226.3 s, amplitude:   3.65e-07 m s^-2, fit:    0.86)
+  LTZ HHE: MOUSE detected, ignoring component in inversion (time of onset:  318.6 s, amplitude:   1.54e-07 m s^-2, fit:    0.83)
+  GVZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   17.9 s, amplitude:   1.01e-07 m s^-2, fit:    0.86)
+  GVZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   10.4 s, amplitude:   1.24e-07 m s^-2, fit:    0.96)
+  GVZ HHE: MOUSE detected, ignoring component in inversion (time of onset:   50.8 s, amplitude:   1.64e-07 m s^-2, fit:    0.83)
+  DSZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   59.0 s, amplitude:   2.90e-07 m s^-2, fit:    0.81)
+  DSZ HHE: MOUSE detected, ignoring component in inversion (time of onset:  272.7 s, amplitude:   5.19e-07 m s^-2, fit:    0.96)
+  THZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   10.9 s, amplitude:   2.97e-07 m s^-2, fit:    0.96)
+  THZ HHE: MOUSE detected, ignoring component in inversion (time of onset:   88.3 s, amplitude:   2.40e-07 m s^-2, fit:    0.81)
+Removing instrument response.
+	Water level: 20
+
+Sampling frequencies:
+  Data sampling: 100.0 Hz
+  Common sampling: 100.0
+  Decimation factor: 250 x
+  Sampling used:   0.4 Hz
+
+Grid parameters:
+  number of points: 5246
+  horizontal step:  2182 m
+  vertical step:  1091 m
+  grid radius:  9.390 km
+  minimal depth: 18.759 km
+  maximal depth: 112.553 km
+Estimated rupture length:  9.390 km
+
+Grid-search over time:
+  min = -2.00 s (-200 samples)
+  max = 11.39 s (1139 samples)
+  step = 0.20 s ( 20 samples)
+
+Green's function calculation:
+  npts:  256
+  tl: 640.00
+  freq:  129
+  npts for inversion:  228
+  source time function: step in displacement
+
+Components used in inversion and their weights
+station     	   	 Z 	 N 	 E 	dist	azimuth	fmin	fmax
+            	   	   	   	   	(km)    	(deg)	(Hz)	(Hz)
+ NZ:MSZ   10	HH 	---	---	---	  45    	 26	0.02	0.05
+ NZ:MLZ   10	HH 	---	1.0	---	  50    	137	0.02	0.05
+ NZ:DCZ   10	HH 	1.0	1.0	1.0	  63    	221	0.02	0.05
+ NZ:WHZ   10	HH 	1.0	1.0	1.0	  97    	168	0.02	0.05
+ NZ:WKZ   10	HH 	1.0	1.0	1.0	 108    	 78	0.02	0.05
+ NZ:EAZ   10	HH 	1.0	1.0	1.0	 130    	100	0.02	0.05
+ NZ:PYZ   10	HH 	1.0	1.0	1.0	 148    	212	0.02	0.05
+ NZ:TUZ   10	HH 	1.0	1.0	1.0	 183    	124	0.02	0.05
+ NZ:APZ   10	HH 	1.0	1.0	1.0	 201    	173	0.02	0.05
+ NZ:SYZ   10	HH 	1.0	1.0	1.0	 201    	146	0.02	0.05
+ NZ:LBZ   10	HH 	1.0	1.0	1.0	 211    	 71	0.02	0.05
+ NZ:ODZ   10	HH 	1.0	1.0	1.0	 233    	 91	0.02	0.05
+ NZ:FOZ   11	HH 	1.0	1.0	1.0	 239    	 46	0.02	0.05
+ NZ:OPZ   10	HH 	1.0	---	1.0	 247    	113	0.02	0.05
+ NZ:FRNZ  10	HH 	1.0	1.0	1.0	 261    	 48	0.02	0.05
+ NZ:CVZ   10	HH 	1.0	1.0	1.0	 273    	 76	0.02	0.05
+ NZ:WHSZ  10	HH 	---	---	1.0	 292    	 49	0.02	0.05
+ NZ:WVZ   10	HH 	---	---	---	 328    	 49	0.02	0.05
+ NZ:INZ   10	HH 	---	1.0	---	 397    	 51	0.02	0.04
+ NZ:MQZ   13	HH 	1.0	1.0	1.0	 423    	 71	0.02	0.04
+ NZ:LTZ   10	HH 	1.0	1.0	---	 446    	 57	0.02	0.03
+ NZ:GVZ   10	HH 	---	---	---	 487    	 64	0.02	0.03
+ NZ:DSZ   10	HH 	1.0	---	---	 495    	 44	0.02	0.03
+ NZ:KHZ   10	HH 	1.0	1.0	1.0	 554    	 60	0.02	0.03
+ NZ:THZ   10	HH 	1.0	---	---	 558    	 51	0.02	0.03
+Pre-calculated grid point 0 was calculated with different parameters. The Axitra crustal.dat file has a different hash, probably the crustal model was changed. The Axitra station.dat file has a different hash, probably the station set was different. 
+Shape or the grid or some parameters changed, calculating Gren's functions again...
+
+Creating covariance matrix
+Inversion of full moment tensor (6 components)
+
+Centroid location:
+  Centroid time: 2026-07-16 09:14:56
+  Lat  -45.039   Lon  167.571   Depth  69.2 km
+  (    0 m to the north and -8728 m to the east with respect to epicenter)
+  Warning: the solution lies on the edge of the grid!
+  time:  2.20 s after origin time
+
+  VR:   87 %
+  CN:    5
+  MT [ Mrr    Mtt    Mpp    Mrt    Mrp    Mtp  ]:
+     [ 1.73  -6.64   1.03  -7.14   3.14  -2.03 ] * 1e+17
+
+Scalar Moment: M0 = 1.07e+18 Nm (Mw = 6.0)
+  DC component:  83 %,   CLVD component:  -5 %,   ISOtropic component: -12 %
+  Fault plane 1: strike = 289, dip =  79, slip-rake = 116
+  Fault plane 2: strike =  41, dip =  28, slip-rake =  24

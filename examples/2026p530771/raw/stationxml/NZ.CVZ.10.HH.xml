@@ -1,0 +1,671 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<FDSNStationXML xmlns="http://www.fdsn.org/xml/station/1" schemaVersion="1.2">
+  <Source>GeoNet</Source>
+  <Sender>WEL(GNS)</Sender>
+  <Module>Delta</Module>
+  <ModuleURI/>
+  <Created>2026-08-13T04:31:32.000000Z</Created>
+  <Network code="NZ" startDate="1884-02-01T00:00:00.000000Z" restrictedStatus="open">
+    <Description>New Zealand National Seismograph Network</Description>
+    <TotalNumberStations>1459</TotalNumberStations>
+    <SelectedNumberStations>1</SelectedNumberStations>
+    <Station code="CVZ" startDate="2014-05-16T00:00:00.000000Z" restrictedStatus="open">
+      <Description>New Zealand National Seismograph Network</Description>
+      <Comment id="1">
+        <Value>Location is given in WGS84</Value>
+      </Comment>
+      <Latitude datum="WGS84" unit="DEGREES">-44.38318</Latitude>
+      <Longitude datum="WGS84" unit="DEGREES">171.00616</Longitude>
+      <Elevation>454.0</Elevation>
+      <Site>
+        <Name>Cave</Name>
+        <Description>9 km south-east of Cave</Description>
+      </Site>
+      <CreationDate>2014-05-16T00:00:00.000000Z</CreationDate>
+      <TotalNumberChannels>30</TotalNumberChannels>
+      <SelectedNumberChannels>3</SelectedNumberChannels>
+      <Channel code="HHE" startDate="2018-09-06T01:10:00.000000Z" restrictedStatus="open" locationCode="10">
+        <Comment id="1">
+          <Value>Location estimated from external GPS measurement</Value>
+        </Comment>
+        <Comment id="2">
+          <Value>Location is given in WGS84</Value>
+        </Comment>
+        <Comment id="3">
+          <Value>Sensor orientation not known</Value>
+        </Comment>
+        <Latitude datum="WGS84" unit="DEGREES">-44.38309</Latitude>
+        <Longitude datum="WGS84" unit="DEGREES">171.0061</Longitude>
+        <Elevation>454.0</Elevation>
+        <Depth>0.0</Depth>
+        <Azimuth unit="DEGREES">90.0</Azimuth>
+        <Dip unit="DEGREES">0.0</Dip>
+        <Type>CONTINUOUS</Type>
+        <Type>GEOPHYSICAL</Type>
+        <SampleRate unit="SAMPLES/S">100.0</SampleRate>
+        <SampleRateRatio>
+          <NumberSamples>100</NumberSamples>
+          <NumberSeconds>1</NumberSeconds>
+        </SampleRateRatio>
+        <Sensor resourceId="Sensor#CMG-3ESPC:T38498">
+          <Type>Broadband Seismometer</Type>
+          <Description>Guralp CMG-3ESPC Broadband Seismometer</Description>
+          <Manufacturer>Guralp</Manufacturer>
+          <Model>CMG-3ESPC</Model>
+          <SerialNumber>T38498</SerialNumber>
+          <InstallationDate>2014-09-01T23:30:00.000000Z</InstallationDate>
+        </Sensor>
+        <DataLogger resourceId="Datalogger#Q330S/6:6711">
+          <Type>Datalogger</Type>
+          <Description>Kinemetrics Q330S Datalogger</Description>
+          <Manufacturer>Kinemetrics</Manufacturer>
+          <Model>Q330S/6</Model>
+          <SerialNumber>6711</SerialNumber>
+          <InstallationDate>2018-09-06T01:10:00.000000Z</InstallationDate>
+        </DataLogger>
+        <Response>
+          <InstrumentSensitivity>
+            <Value>838860800.0</Value>
+            <Frequency>1.0</Frequency>
+            <InputUnits>
+              <Name>m/s</Name>
+              <Description>None</Description>
+            </InputUnits>
+            <OutputUnits>
+              <Name>count</Name>
+              <Description>None</Description>
+            </OutputUnits>
+          </InstrumentSensitivity>
+          <Stage number="1">
+            <PolesZeros name="CVZ.10.HHE.2018.249.stage_1" resourceId="PolesZeros#CMG-3ESP-GN">
+              <InputUnits>
+                <Name>m/s</Name>
+              </InputUnits>
+              <OutputUnits>
+                <Name>V</Name>
+              </OutputUnits>
+              <PzTransferFunctionType>LAPLACE (HERTZ)</PzTransferFunctionType>
+              <NormalizationFactor>2304260.643543416</NormalizationFactor>
+              <NormalizationFrequency unit="HERTZ">1.0</NormalizationFrequency>
+              <Zero number="1">
+                <Real>0.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Zero>
+              <Zero number="2">
+                <Real>0.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Zero>
+              <Pole number="1">
+                <Real>-0.01178</Real>
+                <Imaginary>0.01178</Imaginary>
+              </Pole>
+              <Pole number="2">
+                <Real>-0.01178</Real>
+                <Imaginary>-0.01178</Imaginary>
+              </Pole>
+              <Pole number="3">
+                <Real>-180.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Pole>
+              <Pole number="4">
+                <Real>-160.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Pole>
+              <Pole number="5">
+                <Real>-80.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Pole>
+            </PolesZeros>
+            <StageGain>
+              <Value>2000.0</Value>
+              <Frequency>1.0</Frequency>
+            </StageGain>
+          </Stage>
+          <Stage number="2">
+            <Coefficients name="CVZ.10.HHE.2018.249.stage_2" resourceId="Coefficients#Q330S+_FLbelow100-100">
+              <InputUnits>
+                <Name>V</Name>
+              </InputUnits>
+              <OutputUnits>
+                <Name>count</Name>
+              </OutputUnits>
+              <CfTransferFunctionType>DIGITAL</CfTransferFunctionType>
+            </Coefficients>
+            <Decimation>
+              <InputSampleRate unit="HERTZ">100.0</InputSampleRate>
+              <Factor>1</Factor>
+              <Offset>0</Offset>
+              <Delay>0.0</Delay>
+              <Correction>0.0</Correction>
+            </Decimation>
+            <StageGain>
+              <Value>419430.4</Value>
+              <Frequency>1.0</Frequency>
+            </StageGain>
+          </Stage>
+          <Stage number="3">
+            <FIR name="Q330S+_FLbelow100-100" resourceId="FIR#Q330S+_FLbelow100-100">
+              <InputUnits>
+                <Name>count</Name>
+              </InputUnits>
+              <OutputUnits>
+                <Name>count</Name>
+              </OutputUnits>
+              <Symmetry>NONE</Symmetry>
+              <NumeratorCoefficient>4.9330514e-17</NumeratorCoefficient>
+              <NumeratorCoefficient>2.1926904e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>5.5255019e-08</NumeratorCoefficient>
+              <NumeratorCoefficient>1.5251505e-06</NumeratorCoefficient>
+              <NumeratorCoefficient>7.7166797e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0044009756</NumeratorCoefficient>
+              <NumeratorCoefficient>0.062303458</NumeratorCoefficient>
+              <NumeratorCoefficient>0.31316241</NumeratorCoefficient>
+              <NumeratorCoefficient>0.60944447</NumeratorCoefficient>
+              <NumeratorCoefficient>0.26175441</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.34339936</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0096048639</NumeratorCoefficient>
+              <NumeratorCoefficient>0.21359484</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.21118869</NumeratorCoefficient>
+              <NumeratorCoefficient>0.080851774</NumeratorCoefficient>
+              <NumeratorCoefficient>0.057009417</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.13178769</NumeratorCoefficient>
+              <NumeratorCoefficient>0.13399803</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.082973974</NumeratorCoefficient>
+              <NumeratorCoefficient>0.013660161</NumeratorCoefficient>
+              <NumeratorCoefficient>0.044319993</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.074827556</NumeratorCoefficient>
+              <NumeratorCoefficient>0.075523186</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.054038123</NumeratorCoefficient>
+              <NumeratorCoefficient>0.022485405</NumeratorCoefficient>
+              <NumeratorCoefficient>0.007330853</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.027629246</NumeratorCoefficient>
+              <NumeratorCoefficient>0.035019582</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.031869616</NumeratorCoefficient>
+              <NumeratorCoefficient>0.020515824</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0088097133</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0020197433</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0090516965</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.010877521</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0091440605</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0059007254</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0026682892</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.00026175145</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0010983319</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0015577358</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0014278515</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0010252375</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.00058464888</NumeratorCoefficient>
+              <NumeratorCoefficient>0.00023669812</NumeratorCoefficient>
+              <NumeratorCoefficient>-2.2698544e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>-7.3096229e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>9.0794992e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>-7.0790526e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>4.2077983e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.9047583e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>6.0835045e-06</NumeratorCoefficient>
+              <NumeratorCoefficient>-5.3960865e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.7879031e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>2.878401e-08</NumeratorCoefficient>
+              <NumeratorCoefficient>1.696689e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.3851928e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>6.2710531e-08</NumeratorCoefficient>
+              <NumeratorCoefficient>6.8203826e-11</NumeratorCoefficient>
+              <NumeratorCoefficient>-8.0001711e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.5337061e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.1916255e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>4.5030427e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>7.5236796e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>-7.89445e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.7825014e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.0221897e-12</NumeratorCoefficient>
+              <NumeratorCoefficient>5.4992429e-11</NumeratorCoefficient>
+              <NumeratorCoefficient>2.1763699e-11</NumeratorCoefficient>
+              <NumeratorCoefficient>-9.9043874e-13</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.7023566e-13</NumeratorCoefficient>
+              <NumeratorCoefficient>-9.9507037e-15</NumeratorCoefficient>
+            </FIR>
+            <Decimation>
+              <InputSampleRate unit="HERTZ">100.0</InputSampleRate>
+              <Factor>1</Factor>
+              <Offset>0</Offset>
+              <Delay>0.0</Delay>
+              <Correction>0.0</Correction>
+            </Decimation>
+            <StageGain>
+              <Value>1.0</Value>
+              <Frequency>1.0</Frequency>
+            </StageGain>
+          </Stage>
+        </Response>
+      </Channel>
+      <Channel code="HHN" startDate="2018-09-06T01:10:00.000000Z" restrictedStatus="open" locationCode="10">
+        <Comment id="1">
+          <Value>Location estimated from external GPS measurement</Value>
+        </Comment>
+        <Comment id="2">
+          <Value>Location is given in WGS84</Value>
+        </Comment>
+        <Comment id="3">
+          <Value>Sensor orientation not known</Value>
+        </Comment>
+        <Latitude datum="WGS84" unit="DEGREES">-44.38309</Latitude>
+        <Longitude datum="WGS84" unit="DEGREES">171.0061</Longitude>
+        <Elevation>454.0</Elevation>
+        <Depth>0.0</Depth>
+        <Azimuth unit="DEGREES">0.0</Azimuth>
+        <Dip unit="DEGREES">0.0</Dip>
+        <Type>CONTINUOUS</Type>
+        <Type>GEOPHYSICAL</Type>
+        <SampleRate unit="SAMPLES/S">100.0</SampleRate>
+        <SampleRateRatio>
+          <NumberSamples>100</NumberSamples>
+          <NumberSeconds>1</NumberSeconds>
+        </SampleRateRatio>
+        <Sensor resourceId="Sensor#CMG-3ESPC:T38498">
+          <Type>Broadband Seismometer</Type>
+          <Description>Guralp CMG-3ESPC Broadband Seismometer</Description>
+          <Manufacturer>Guralp</Manufacturer>
+          <Model>CMG-3ESPC</Model>
+          <SerialNumber>T38498</SerialNumber>
+          <InstallationDate>2014-09-01T23:30:00.000000Z</InstallationDate>
+        </Sensor>
+        <DataLogger resourceId="Datalogger#Q330S/6:6711">
+          <Type>Datalogger</Type>
+          <Description>Kinemetrics Q330S Datalogger</Description>
+          <Manufacturer>Kinemetrics</Manufacturer>
+          <Model>Q330S/6</Model>
+          <SerialNumber>6711</SerialNumber>
+          <InstallationDate>2018-09-06T01:10:00.000000Z</InstallationDate>
+        </DataLogger>
+        <Response>
+          <InstrumentSensitivity>
+            <Value>838860800.0</Value>
+            <Frequency>1.0</Frequency>
+            <InputUnits>
+              <Name>m/s</Name>
+              <Description>None</Description>
+            </InputUnits>
+            <OutputUnits>
+              <Name>count</Name>
+              <Description>None</Description>
+            </OutputUnits>
+          </InstrumentSensitivity>
+          <Stage number="1">
+            <PolesZeros name="CVZ.10.HHN.2018.249.stage_1" resourceId="PolesZeros#CMG-3ESP-GN">
+              <InputUnits>
+                <Name>m/s</Name>
+              </InputUnits>
+              <OutputUnits>
+                <Name>V</Name>
+              </OutputUnits>
+              <PzTransferFunctionType>LAPLACE (HERTZ)</PzTransferFunctionType>
+              <NormalizationFactor>2304260.643543416</NormalizationFactor>
+              <NormalizationFrequency unit="HERTZ">1.0</NormalizationFrequency>
+              <Zero number="1">
+                <Real>0.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Zero>
+              <Zero number="2">
+                <Real>0.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Zero>
+              <Pole number="1">
+                <Real>-0.01178</Real>
+                <Imaginary>0.01178</Imaginary>
+              </Pole>
+              <Pole number="2">
+                <Real>-0.01178</Real>
+                <Imaginary>-0.01178</Imaginary>
+              </Pole>
+              <Pole number="3">
+                <Real>-180.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Pole>
+              <Pole number="4">
+                <Real>-160.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Pole>
+              <Pole number="5">
+                <Real>-80.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Pole>
+            </PolesZeros>
+            <StageGain>
+              <Value>2000.0</Value>
+              <Frequency>1.0</Frequency>
+            </StageGain>
+          </Stage>
+          <Stage number="2">
+            <Coefficients name="CVZ.10.HHN.2018.249.stage_2" resourceId="Coefficients#Q330S+_FLbelow100-100">
+              <InputUnits>
+                <Name>V</Name>
+              </InputUnits>
+              <OutputUnits>
+                <Name>count</Name>
+              </OutputUnits>
+              <CfTransferFunctionType>DIGITAL</CfTransferFunctionType>
+            </Coefficients>
+            <Decimation>
+              <InputSampleRate unit="HERTZ">100.0</InputSampleRate>
+              <Factor>1</Factor>
+              <Offset>0</Offset>
+              <Delay>0.0</Delay>
+              <Correction>0.0</Correction>
+            </Decimation>
+            <StageGain>
+              <Value>419430.4</Value>
+              <Frequency>1.0</Frequency>
+            </StageGain>
+          </Stage>
+          <Stage number="3">
+            <FIR name="Q330S+_FLbelow100-100" resourceId="FIR#Q330S+_FLbelow100-100">
+              <InputUnits>
+                <Name>count</Name>
+              </InputUnits>
+              <OutputUnits>
+                <Name>count</Name>
+              </OutputUnits>
+              <Symmetry>NONE</Symmetry>
+              <NumeratorCoefficient>4.9330514e-17</NumeratorCoefficient>
+              <NumeratorCoefficient>2.1926904e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>5.5255019e-08</NumeratorCoefficient>
+              <NumeratorCoefficient>1.5251505e-06</NumeratorCoefficient>
+              <NumeratorCoefficient>7.7166797e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0044009756</NumeratorCoefficient>
+              <NumeratorCoefficient>0.062303458</NumeratorCoefficient>
+              <NumeratorCoefficient>0.31316241</NumeratorCoefficient>
+              <NumeratorCoefficient>0.60944447</NumeratorCoefficient>
+              <NumeratorCoefficient>0.26175441</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.34339936</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0096048639</NumeratorCoefficient>
+              <NumeratorCoefficient>0.21359484</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.21118869</NumeratorCoefficient>
+              <NumeratorCoefficient>0.080851774</NumeratorCoefficient>
+              <NumeratorCoefficient>0.057009417</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.13178769</NumeratorCoefficient>
+              <NumeratorCoefficient>0.13399803</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.082973974</NumeratorCoefficient>
+              <NumeratorCoefficient>0.013660161</NumeratorCoefficient>
+              <NumeratorCoefficient>0.044319993</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.074827556</NumeratorCoefficient>
+              <NumeratorCoefficient>0.075523186</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.054038123</NumeratorCoefficient>
+              <NumeratorCoefficient>0.022485405</NumeratorCoefficient>
+              <NumeratorCoefficient>0.007330853</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.027629246</NumeratorCoefficient>
+              <NumeratorCoefficient>0.035019582</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.031869616</NumeratorCoefficient>
+              <NumeratorCoefficient>0.020515824</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0088097133</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0020197433</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0090516965</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.010877521</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0091440605</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0059007254</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0026682892</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.00026175145</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0010983319</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0015577358</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0014278515</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0010252375</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.00058464888</NumeratorCoefficient>
+              <NumeratorCoefficient>0.00023669812</NumeratorCoefficient>
+              <NumeratorCoefficient>-2.2698544e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>-7.3096229e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>9.0794992e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>-7.0790526e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>4.2077983e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.9047583e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>6.0835045e-06</NumeratorCoefficient>
+              <NumeratorCoefficient>-5.3960865e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.7879031e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>2.878401e-08</NumeratorCoefficient>
+              <NumeratorCoefficient>1.696689e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.3851928e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>6.2710531e-08</NumeratorCoefficient>
+              <NumeratorCoefficient>6.8203826e-11</NumeratorCoefficient>
+              <NumeratorCoefficient>-8.0001711e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.5337061e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.1916255e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>4.5030427e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>7.5236796e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>-7.89445e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.7825014e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.0221897e-12</NumeratorCoefficient>
+              <NumeratorCoefficient>5.4992429e-11</NumeratorCoefficient>
+              <NumeratorCoefficient>2.1763699e-11</NumeratorCoefficient>
+              <NumeratorCoefficient>-9.9043874e-13</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.7023566e-13</NumeratorCoefficient>
+              <NumeratorCoefficient>-9.9507037e-15</NumeratorCoefficient>
+            </FIR>
+            <Decimation>
+              <InputSampleRate unit="HERTZ">100.0</InputSampleRate>
+              <Factor>1</Factor>
+              <Offset>0</Offset>
+              <Delay>0.0</Delay>
+              <Correction>0.0</Correction>
+            </Decimation>
+            <StageGain>
+              <Value>1.0</Value>
+              <Frequency>1.0</Frequency>
+            </StageGain>
+          </Stage>
+        </Response>
+      </Channel>
+      <Channel code="HHZ" startDate="2018-09-06T01:10:00.000000Z" restrictedStatus="open" locationCode="10">
+        <Comment id="1">
+          <Value>Location estimated from external GPS measurement</Value>
+        </Comment>
+        <Comment id="2">
+          <Value>Location is given in WGS84</Value>
+        </Comment>
+        <Comment id="3">
+          <Value>Sensor orientation not known</Value>
+        </Comment>
+        <Latitude datum="WGS84" unit="DEGREES">-44.38309</Latitude>
+        <Longitude datum="WGS84" unit="DEGREES">171.0061</Longitude>
+        <Elevation>454.0</Elevation>
+        <Depth>0.0</Depth>
+        <Azimuth unit="DEGREES">0.0</Azimuth>
+        <Dip unit="DEGREES">-90.0</Dip>
+        <Type>CONTINUOUS</Type>
+        <Type>GEOPHYSICAL</Type>
+        <SampleRate unit="SAMPLES/S">100.0</SampleRate>
+        <SampleRateRatio>
+          <NumberSamples>100</NumberSamples>
+          <NumberSeconds>1</NumberSeconds>
+        </SampleRateRatio>
+        <Sensor resourceId="Sensor#CMG-3ESPC:T38498">
+          <Type>Broadband Seismometer</Type>
+          <Description>Guralp CMG-3ESPC Broadband Seismometer</Description>
+          <Manufacturer>Guralp</Manufacturer>
+          <Model>CMG-3ESPC</Model>
+          <SerialNumber>T38498</SerialNumber>
+          <InstallationDate>2014-09-01T23:30:00.000000Z</InstallationDate>
+        </Sensor>
+        <DataLogger resourceId="Datalogger#Q330S/6:6711">
+          <Type>Datalogger</Type>
+          <Description>Kinemetrics Q330S Datalogger</Description>
+          <Manufacturer>Kinemetrics</Manufacturer>
+          <Model>Q330S/6</Model>
+          <SerialNumber>6711</SerialNumber>
+          <InstallationDate>2018-09-06T01:10:00.000000Z</InstallationDate>
+        </DataLogger>
+        <Response>
+          <InstrumentSensitivity>
+            <Value>838860800.0</Value>
+            <Frequency>1.0</Frequency>
+            <InputUnits>
+              <Name>m/s</Name>
+              <Description>None</Description>
+            </InputUnits>
+            <OutputUnits>
+              <Name>count</Name>
+              <Description>None</Description>
+            </OutputUnits>
+          </InstrumentSensitivity>
+          <Stage number="1">
+            <PolesZeros name="CVZ.10.HHZ.2018.249.stage_1" resourceId="PolesZeros#CMG-3ESP-GN">
+              <InputUnits>
+                <Name>m/s</Name>
+              </InputUnits>
+              <OutputUnits>
+                <Name>V</Name>
+              </OutputUnits>
+              <PzTransferFunctionType>LAPLACE (HERTZ)</PzTransferFunctionType>
+              <NormalizationFactor>2304260.643543416</NormalizationFactor>
+              <NormalizationFrequency unit="HERTZ">1.0</NormalizationFrequency>
+              <Zero number="1">
+                <Real>0.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Zero>
+              <Zero number="2">
+                <Real>0.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Zero>
+              <Pole number="1">
+                <Real>-0.01178</Real>
+                <Imaginary>0.01178</Imaginary>
+              </Pole>
+              <Pole number="2">
+                <Real>-0.01178</Real>
+                <Imaginary>-0.01178</Imaginary>
+              </Pole>
+              <Pole number="3">
+                <Real>-180.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Pole>
+              <Pole number="4">
+                <Real>-160.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Pole>
+              <Pole number="5">
+                <Real>-80.0</Real>
+                <Imaginary>0.0</Imaginary>
+              </Pole>
+            </PolesZeros>
+            <StageGain>
+              <Value>2000.0</Value>
+              <Frequency>1.0</Frequency>
+            </StageGain>
+          </Stage>
+          <Stage number="2">
+            <Coefficients name="CVZ.10.HHZ.2018.249.stage_2" resourceId="Coefficients#Q330S+_FLbelow100-100">
+              <InputUnits>
+                <Name>V</Name>
+              </InputUnits>
+              <OutputUnits>
+                <Name>count</Name>
+              </OutputUnits>
+              <CfTransferFunctionType>DIGITAL</CfTransferFunctionType>
+            </Coefficients>
+            <Decimation>
+              <InputSampleRate unit="HERTZ">100.0</InputSampleRate>
+              <Factor>1</Factor>
+              <Offset>0</Offset>
+              <Delay>0.0</Delay>
+              <Correction>0.0</Correction>
+            </Decimation>
+            <StageGain>
+              <Value>419430.4</Value>
+              <Frequency>1.0</Frequency>
+            </StageGain>
+          </Stage>
+          <Stage number="3">
+            <FIR name="Q330S+_FLbelow100-100" resourceId="FIR#Q330S+_FLbelow100-100">
+              <InputUnits>
+                <Name>count</Name>
+              </InputUnits>
+              <OutputUnits>
+                <Name>count</Name>
+              </OutputUnits>
+              <Symmetry>NONE</Symmetry>
+              <NumeratorCoefficient>4.9330514e-17</NumeratorCoefficient>
+              <NumeratorCoefficient>2.1926904e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>5.5255019e-08</NumeratorCoefficient>
+              <NumeratorCoefficient>1.5251505e-06</NumeratorCoefficient>
+              <NumeratorCoefficient>7.7166797e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0044009756</NumeratorCoefficient>
+              <NumeratorCoefficient>0.062303458</NumeratorCoefficient>
+              <NumeratorCoefficient>0.31316241</NumeratorCoefficient>
+              <NumeratorCoefficient>0.60944447</NumeratorCoefficient>
+              <NumeratorCoefficient>0.26175441</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.34339936</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0096048639</NumeratorCoefficient>
+              <NumeratorCoefficient>0.21359484</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.21118869</NumeratorCoefficient>
+              <NumeratorCoefficient>0.080851774</NumeratorCoefficient>
+              <NumeratorCoefficient>0.057009417</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.13178769</NumeratorCoefficient>
+              <NumeratorCoefficient>0.13399803</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.082973974</NumeratorCoefficient>
+              <NumeratorCoefficient>0.013660161</NumeratorCoefficient>
+              <NumeratorCoefficient>0.044319993</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.074827556</NumeratorCoefficient>
+              <NumeratorCoefficient>0.075523186</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.054038123</NumeratorCoefficient>
+              <NumeratorCoefficient>0.022485405</NumeratorCoefficient>
+              <NumeratorCoefficient>0.007330853</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.027629246</NumeratorCoefficient>
+              <NumeratorCoefficient>0.035019582</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.031869616</NumeratorCoefficient>
+              <NumeratorCoefficient>0.020515824</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0088097133</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0020197433</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0090516965</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.010877521</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0091440605</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0059007254</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0026682892</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.00026175145</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0010983319</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0015577358</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.0014278515</NumeratorCoefficient>
+              <NumeratorCoefficient>0.0010252375</NumeratorCoefficient>
+              <NumeratorCoefficient>-0.00058464888</NumeratorCoefficient>
+              <NumeratorCoefficient>0.00023669812</NumeratorCoefficient>
+              <NumeratorCoefficient>-2.2698544e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>-7.3096229e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>9.0794992e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>-7.0790526e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>4.2077983e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.9047583e-05</NumeratorCoefficient>
+              <NumeratorCoefficient>6.0835045e-06</NumeratorCoefficient>
+              <NumeratorCoefficient>-5.3960865e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.7879031e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>2.878401e-08</NumeratorCoefficient>
+              <NumeratorCoefficient>1.696689e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.3851928e-07</NumeratorCoefficient>
+              <NumeratorCoefficient>6.2710531e-08</NumeratorCoefficient>
+              <NumeratorCoefficient>6.8203826e-11</NumeratorCoefficient>
+              <NumeratorCoefficient>-8.0001711e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.5337061e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.1916255e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>4.5030427e-09</NumeratorCoefficient>
+              <NumeratorCoefficient>7.5236796e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>-7.89445e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.7825014e-10</NumeratorCoefficient>
+              <NumeratorCoefficient>-4.0221897e-12</NumeratorCoefficient>
+              <NumeratorCoefficient>5.4992429e-11</NumeratorCoefficient>
+              <NumeratorCoefficient>2.1763699e-11</NumeratorCoefficient>
+              <NumeratorCoefficient>-9.9043874e-13</NumeratorCoefficient>
+              <NumeratorCoefficient>-1.7023566e-13</NumeratorCoefficient>
+              <NumeratorCoefficient>-9.9507037e-15</NumeratorCoefficient>
+            </FIR>
+            <Decimation>
+              <InputSampleRate unit="HERTZ">100.0</InputSampleRate>
+              <Factor>1</Factor>
+              <Offset>0</Offset>
+              <Delay>0.0</Delay>
+              <Correction>0.0</Correction>
+            </Decimation>
+            <StageGain>
+              <Value>1.0</Value>
+              <Frequency>1.0</Frequency>
+            </StageGain>
+          </Stage>
+        </Response>
+      </Channel>
+    </Station>
+  </Network>
+</FDSNStationXML>

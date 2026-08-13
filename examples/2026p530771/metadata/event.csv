@@ -1,0 +1,2 @@
+event_id,origin_time,event_lon,event_lat,event_depth_km,magnitude,min_radius_km,max_radius_km,radius_scale_factor,ground_level,taup_model,t_before_s,t_after_s,fdsn_clients
+2026p530771,2026-07-16T09:14:54.328610Z,167.681930541992,-45.038818359375,37.5175437927246,5.9,0.0,600.61751795234,1.66,True,iasp91,2366.0,590.0,GEONET

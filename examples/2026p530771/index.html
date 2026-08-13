@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<title>BayesISOLA CMT — 2026p530771</title>
+<link rel="stylesheet" href="html/style.css" />
+<link rel="stylesheet" href="html/css/lightbox.min.css" />
+</head>
+<body>
+<h1>BayesISOLA CMT — 2026p530771</h1>
+<dl>  <dt>Method</dt>
+  <dd>Waveform inversion for <strong>full</strong> moment tensor (6 components)<br />
+    with the <strong>data covariance matrix</strong> based on real noise<br />
+    with <strong>crosscovariance</strong> between components.</dd>
+  <dt>Reference</dt>
+  <dd>Vackář, Gallovič, Burjánek, Zahradník, and Clinton. Bayesian ISOLA: new tool for automated centroid moment tensor inversion, <em>in preparation</em>, <a href="http://geo.mff.cuni.cz/~vackar/papers/isola-obspy.pdf">PDF</a></dd>
+</dl>
+
+<h2>Hypocenter location</h2>
+
+<dl>
+<dt>Agency</dt>
+<dd></dd>
+<dt>Origin time</dt>
+<dd>2026-07-16 09:14:54</dd>
+<dt>Latitude</dt>
+<dd> -45.039° N</dd>
+<dt>Longitude</dt>
+<dd> 167.682° E</dd>
+<dt>Depth</dt>
+<dd>37.5 km</dd>
+<dt>Magnitude</dt>
+<dd>5.9</dd>
+</dl>
+
+
+<h2>Results</h2>
+
+<h3>Centroid location</h3>
+
+<table>
+	<tr>
+	<th></th>
+	<th>absolute</th>
+	<th>relative</th>
+	</tr>
+	<tr>
+	<th>Time</th>
+	<td>2026-07-16 09:14:56</td>
+	<td> 2.20 s after origin time</td>
+	</tr>
+	<tr>
+	<th>Latitude</th>
+	<td>  45.039° S</td>
+	<td>    0 m  of the epicenter</td>
+	</tr>
+	<tr>
+	<th>Longitude</th>
+	<td> 167.571° E</td>
+	<td> 8728 m west of the epicenter</td>
+	</tr>
+	<tr>
+	<th>Depth</th>
+	<td> 69.2 km</td>
+	<td> 31.6 km deeper than location</td>
+	</tr>
+</table>
+
+<p class="warning">Warning: the solution lies on the edge of the grid!</p>
+
+<h3>Moment tensor and its quality</h3>
+
+
+<table>
+  <tr><th colspan="2" class="center">Centroid position</th></tr>
+  <tr><th>depth</th>	<td>69.2 km</td></tr>
+  <tr><th colspan="2" class="center">Seismic moment</th></tr>
+  <tr><th>scalar seismic moment M<sub>0</sub></th>	<td>1.07e+18 Nm</td></tr>
+  <tr><th>moment magnitude M<sub>w</sub></th>	<td>6.0</td></tr>
+  <tr><th colspan="2" class="center">Moment tensor components</th></tr>
+  <tr><th>M<sub>rr</sub></th>			<td> 1.73 * 1e+17</td></tr>
+  <tr><th>M<sub>&theta;&theta;</sub></th>	<td>-6.64 * 1e+17</td></tr>
+  <tr><th>M<sub>&#981;&#981;</sub></th>		<td> 1.03 * 1e+17</td></tr>
+  <tr><th>M<sub>r&theta;</sub></th>		<td>-7.14 * 1e+17</td></tr>
+  <tr><th>M<sub>r&#981;</sub></th>		<td> 3.14 * 1e+17</td></tr>
+  <tr><th>M<sub>&theta;&#981;</sub></th>	<td>-2.03 * 1e+17</td></tr>
+  <tr><th colspan="2" class="center">Moment tensor decomposition</th></tr>
+  <tr><th>DC</th>	<td> 83 %</td></tr>
+  <tr><th>CLVD</th>	<td> -5 %</td></tr>
+
+  <tr><th>ISO</th>	<td>-12 %</td></tr>
+
+  <tr><th>strike</th>	<td>289 /  41</td></tr>
+  <tr><th>dip</th>  	<td> 79 /  28</td></tr>
+  <tr><th>rake</th>	<td>116 /  24</td></tr>
+  <tr><th colspan="2" class="center">Quality measures</th></tr>
+  <tr><th>condition number</th>	<td> 5</td></tr>
+  <tr><th>variance reduction</th>	<td>87 %</td></tr>
+  <tr><th>VR (4 closest components)</th>	<td>92 %</td></tr></table>
+
+
+
+<h2>Data used</h2>
+
+
+<div class="thumb tright">
+  <a href="2026p530771/stations.png" data-lightbox="stations">
+    <img alt="" src="2026p530771/stations.png" width="200" class="thumbimage" />
+  </a>
+  <div class="thumbcaption">
+    stations used
+  </div>
+</div>
+
+
+<h3>Components used in inversion and their weights</h3>
+
+<table>
+  <tr><th colspan="2">station</th>	<th colspan="3">component</th>		<th><abbr title="epicentral distance">distance *</abbr></th>	<th>azimuth</th>	<th>fmin</th>	<th>fmax</th></tr>
+  <tr><th>code</th>	<th>channel</th>	<th>Z</th>	<th>N</th>	<th>E</th>	<th>(km)</th>	<th>(deg)</th>	<th>(Hz)</th>	<th>(Hz)</th></tr>
+<tr><td> NZ:MSZ   10</td>	<td>HH </td>	<td>---</td>	<td>---</td>	<td>---</td>	<td>  45    </td>	<td> 26</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:MLZ   10</td>	<td>HH </td>	<td>---</td>	<td>1.0</td>	<td>---</td>	<td>  50    </td>	<td>137</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:DCZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td>  63    </td>	<td>221</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:WHZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td>  97    </td>	<td>168</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:WKZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 108    </td>	<td> 78</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:EAZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 130    </td>	<td>100</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:PYZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 148    </td>	<td>212</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:TUZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 183    </td>	<td>124</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:APZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 201    </td>	<td>173</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:SYZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 201    </td>	<td>146</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:LBZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 211    </td>	<td> 71</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:ODZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 233    </td>	<td> 91</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:FOZ   11</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 239    </td>	<td> 46</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:OPZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>---</td>	<td>1.0</td>	<td> 247    </td>	<td>113</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:FRNZ  10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 261    </td>	<td> 48</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:CVZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 273    </td>	<td> 76</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:WHSZ  10</td>	<td>HH </td>	<td>---</td>	<td>---</td>	<td>1.0</td>	<td> 292    </td>	<td> 49</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:WVZ   10</td>	<td>HH </td>	<td>---</td>	<td>---</td>	<td>---</td>	<td> 328    </td>	<td> 49</td>	<td>0.02</td>	<td>0.05</td></tr>
+<tr><td> NZ:INZ   10</td>	<td>HH </td>	<td>---</td>	<td>1.0</td>	<td>---</td>	<td> 397    </td>	<td> 51</td>	<td>0.02</td>	<td>0.04</td></tr>
+<tr><td> NZ:MQZ   13</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 423    </td>	<td> 71</td>	<td>0.02</td>	<td>0.04</td></tr>
+<tr><td> NZ:LTZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>---</td>	<td> 446    </td>	<td> 57</td>	<td>0.02</td>	<td>0.03</td></tr>
+<tr><td> NZ:GVZ   10</td>	<td>HH </td>	<td>---</td>	<td>---</td>	<td>---</td>	<td> 487    </td>	<td> 64</td>	<td>0.02</td>	<td>0.03</td></tr>
+<tr><td> NZ:DSZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>---</td>	<td>---</td>	<td> 495    </td>	<td> 44</td>	<td>0.02</td>	<td>0.03</td></tr>
+<tr><td> NZ:KHZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>1.0</td>	<td>1.0</td>	<td> 554    </td>	<td> 60</td>	<td>0.02</td>	<td>0.03</td></tr>
+<tr><td> NZ:THZ   10</td>	<td>HH </td>	<td>1.0</td>	<td>---</td>	<td>---</td>	<td> 558    </td>	<td> 51</td>	<td>0.02</td>	<td>0.03</td></tr>
+</table>
+
+<h3>Mouse detection</h3>
+<p>
+  MSZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:    5.6 s, amplitude:   5.32e-05 m s^-2, fit:    0.92)<br />
+  MSZ HHN: MOUSE detected, ignoring component in inversion (time of onset:    6.1 s, amplitude:   7.71e-05 m s^-2, fit:    0.94)<br />
+  MSZ HHE: MOUSE detected, ignoring component in inversion (time of onset:    5.6 s, amplitude:   2.04e-04 m s^-2, fit:    0.93)<br />
+  MLZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   24.9 s, amplitude:   4.39e-06 m s^-2, fit:    0.96)<br />
+  MLZ HHE: MOUSE detected, ignoring component in inversion (time of onset:   19.9 s, amplitude:   7.83e-06 m s^-2, fit:    0.96)<br />
+  OPZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   79.2 s, amplitude:   6.17e-07 m s^-2, fit:    0.62)<br />
+  WHSZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   13.4 s, amplitude:   8.67e-07 m s^-2, fit:    0.84)<br />
+  WHSZ HHN: MOUSE detected, ignoring component in inversion (time of onset:  155.4 s, amplitude:   9.38e-07 m s^-2, fit:    0.62)<br />
+  WVZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   23.3 s, amplitude:   3.24e-05 m s^-2, fit:    0.89)<br />
+  WVZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   23.0 s, amplitude:   3.95e-05 m s^-2, fit:    0.89)<br />
+  WVZ HHE: MOUSE detected, ignoring component in inversion (time of onset:   23.3 s, amplitude:   2.29e-05 m s^-2, fit:    0.89)<br />
+  INZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   34.8 s, amplitude:   1.39e-07 m s^-2, fit:    0.85)<br />
+  INZ HHE: MOUSE detected, ignoring component in inversion (time of onset:  226.3 s, amplitude:   3.65e-07 m s^-2, fit:    0.86)<br />
+  LTZ HHE: MOUSE detected, ignoring component in inversion (time of onset:  318.6 s, amplitude:   1.54e-07 m s^-2, fit:    0.83)<br />
+  GVZ HHZ: MOUSE detected, ignoring component in inversion (time of onset:   17.9 s, amplitude:   1.01e-07 m s^-2, fit:    0.86)<br />
+  GVZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   10.4 s, amplitude:   1.24e-07 m s^-2, fit:    0.96)<br />
+  GVZ HHE: MOUSE detected, ignoring component in inversion (time of onset:   50.8 s, amplitude:   1.64e-07 m s^-2, fit:    0.83)<br />
+  DSZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   59.0 s, amplitude:   2.90e-07 m s^-2, fit:    0.81)<br />
+  DSZ HHE: MOUSE detected, ignoring component in inversion (time of onset:  272.7 s, amplitude:   5.19e-07 m s^-2, fit:    0.96)<br />
+  THZ HHN: MOUSE detected, ignoring component in inversion (time of onset:   10.9 s, amplitude:   2.97e-07 m s^-2, fit:    0.96)<br />
+  THZ HHE: MOUSE detected, ignoring component in inversion (time of onset:   88.3 s, amplitude:   2.40e-07 m s^-2, fit:    0.81)<br />
+<br />
+<h3>Data source</h3>
+<p>
+Station coordinates: 2026p530771\input\network.stn<br />
+Loaded 25 local miniSEED/StationXML station streams.
+</p>
+
+
+
+
+<h2>Stability and uncertainty of the solution</h2>
+
+<h3>Posterior probability density function (PPD)</h3>
+
+
+<div class="thumb tleft">
+  <a href="2026p530771/map_sum_top.png" data-lightbox="PPD">
+    <img alt="" src="2026p530771/map_sum_top.png" height="150" class="thumbimage" />
+  </a>
+  <div class="thumbcaption">
+    PPD: top view
+  </div>
+</div>
+
+<div class="thumb tleft">
+  <a href="2026p530771/map_sum_N-S.png" data-lightbox="PPD">
+    <img alt="" src="2026p530771/map_sum_N-S.png" height="150" class="thumbimage" />
+  </a>
+  <div class="thumbcaption">
+    PPD: north-south view
+  </div>
+</div>
+
+<div class="thumb tleft">
+  <a href="2026p530771/map_sum_W-E.png" data-lightbox="PPD">
+    <img alt="" src="2026p530771/map_sum_W-E.png" height="150" class="thumbimage" />
+  </a>
+  <div class="thumbcaption">
+    PPD: west-east view
+  </div>
+</div>
+
+
+<h2>Calculation parameters</h2>
+
+<h3>Grid-search over space</h3>
+<dl>
+  <dt>number of points</dt>
+  <dd>5246</dd>
+  <dt>horizontal step</dt>
+  <dd> 2182 m</dd>
+  <dt>vertical step</dt>
+  <dd> 1091 m</dd>
+  <dt>grid radius</dt>
+  <dd> 9.390 km</dd>
+  <dt>minimal depth</dt>
+  <dd>18.759 km</dd>
+  <dt>maximal depth</dt>
+  <dd>112.553 km</dd>
+  <dt>rupture length (estimated)</dt>
+  <dd> 9.390 km</dd>
+</dl>
+
+<h3>Grid-search over time</h3>
+<dl>
+  <dt>min</dt>
+  <dd>-2.00 s (-200 samples)</dd>
+  <dt>max</dt>
+  <dd>11.39 s (1139 samples)</dd>
+  <dt>step</dt>
+  <dd>0.20 s ( 20 samples)</dd>
+</dl>
+
+<h3>Green's function calculation</h3>
+<dl>
+  <dt>Crustal model</dt>
+  <dd>2026p530771\input\crustal.dat</dd>
+  <dt>npts</dt>
+  <dd> 256</dd>
+  <dt>tl</dt>
+  <dd>640.00</dd>
+  <dt>freq</dt>
+  <dd> 129</dd>
+  <dt>npts for inversion</dt>
+  <dd> 228</dd>
+  <dt>source time function</dt>
+  <dd>step in displacement</dd>
+</dl>
+
+<h3>Sampling frequencies</h3>
+<dl>
+  <dt>Data sampling</dt>
+  <dd>100.0 Hz</dd>
+  <dt>Common sampling</dt>
+  <dd>100.0 Hz</dd>
+  <dt>Decimation factor</dt>
+  <dd>250 x</dd>
+  <dt>Sampling used</dt>
+  <dd>  0.4 Hz</dd>
+</dl>
+
+<script src="html/js/lightbox-plus-jquery.min.js"></script>
+<script>
+lightbox.option({
+'resizeDuration': 0
+})
+</script>
+</body>
+</html>
