@@ -11,15 +11,25 @@ from BayesISOLA.MT_comps import a2mt
 from BayesISOLA._paths import copy_html_resources
 
 def imgpath(img, img2, html):
-	"""
-	Helper function for :func:`html_log`.
-	"""
-	if img and img != 'auto':
-		return img
-	if img2:
-		d = os.path.dirname(html)
-		return os.path.relpath(img2, d)
-	return None
+    """
+    Return a path suitable for embedding in a generated HTML document.
+
+    Explicit paths in ``img`` or absolute paths in ``img2`` are made relative
+    to the HTML file. Relative resource paths in ``img2`` are already relative
+    to the HTML document and are therefore returned unchanged.
+
+    This avoids cross-drive ``os.path.relpath`` failures on Windows when the
+    HTML output and the Python working directory are on different drives.
+    """
+    if img:
+        return os.path.relpath(img, os.path.dirname(html))
+
+    if img2:
+        if not os.path.isabs(img2):
+            return img2.replace("\\", "/")
+        return os.path.relpath(img2, os.path.dirname(html))
+
+    return None
 
 def html_log(self, outfile='$outdir/index.html', reference=None, h1='ISOLA-ObsPy automated solution', backlink=False, plot_MT='auto', plot_uncertainty='auto', plot_stations='auto', plot_seismo_cova='auto', plot_seismo_sharey='auto', mouse_figures=None, plot_spectra='auto', plot_noise='auto', plot_covariance_function='auto', plot_covariance_matrix='auto', plot_maps='auto', plot_slices='auto', plot_maps_sum='auto', MT_comp_precision=2):
 	"""
