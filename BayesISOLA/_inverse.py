@@ -69,6 +69,12 @@ def run_inversion(self):
 		grid[i]['id'] = point_id
 		if not grid[i]['err']:
 			todo.append(i)
+
+	if not todo:
+		raise RuntimeError(
+			"No valid grid points remain for moment-tensor inversion. "
+			"Check Green's-function generation/cache validation and grid-point errors."
+		)
 	
 	# Create the data norm once for every source-time shift. Noise covariance
 	# uses the stored whitening factors, so the shifted data are whitened once

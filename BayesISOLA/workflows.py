@@ -298,8 +298,25 @@ def _as_bool(value, *, default: bool = False) -> bool:
     raise ValueError(f"Cannot interpret {value!r} as a boolean.")
 
 
+_STATION_TEXT_COLUMNS = (
+    "network", "station", "location", "channel_prefix", "station_id",
+    "component_scheme", "selected_channels", "channels", "gf_model",
+)
+
+
 def _coerce_station_df(station_df: pd.DataFrame | str | Path) -> pd.DataFrame:
-    table = pd.read_csv(Path(station_df).expanduser()) if isinstance(station_df, (str, Path)) else station_df.copy()
+    """Return a station table while preserving literal SEED identifier fields.
+
+    pandas type inference can otherwise coerce identifiers such as location
+    ``"00"`` or station ``"0123"`` to integers when a saved CSV is reloaded.
+    Converters are used rather than ``dtype=str`` so literal codes such as
+    network ``"NA"`` are not interpreted as missing values.
+    """
+    if isinstance(station_df, (str, Path)):
+        converters = {column: lambda value: str(value).strip() for column in _STATION_TEXT_COLUMNS}
+        table = pd.read_csv(Path(station_df).expanduser(), converters=converters)
+    else:
+        table = station_df.copy()
     if table.empty:
         raise ValueError("station_df is empty.")
     return table
@@ -594,7 +611,7 @@ def write_network_file(station_df: pd.DataFrame | str | Path, filename: str | Pa
         raise KeyError(f"station_df is missing network-file columns: {sorted(missing)}")
     filename = Path(filename).expanduser()
     filename.parent.mkdir(parents=True, exist_ok=True)
-    with filename.open("w") as f:
+    with filename.open("w", encoding="utf-8", newline="\n") as f:
         for row in table.to_dict("records"):
             location = _normalize_location(row["location"])
             station_code = f"{row['network']}:{row['station']}:{location}:{row['channel_prefix']}"
@@ -1481,11 +1498,8 @@ def plot_station_section(
     return output_file
 
 def _get_gf_helpers_module():
-    """Import ``gf_helpers`` from BayesISOLA when packaged, with legacy fallback."""
-    try:
-        from BayesISOLA import gf_helpers as module
-    except ImportError:
-        import gf_helpers as module
+    """Import the packaged ``BayesISOLA.gf_helpers`` module only."""
+    from BayesISOLA import gf_helpers as module
     return module
 
 
@@ -1576,7 +1590,7 @@ def _prepare_crust_file(
     if missing:
         raise KeyError(f"Layer conversion did not produce BayesISOLA-required columns: {missing}")
     table = layers[required]
-    with output_file.open("w") as f:
+    with output_file.open("w", encoding="utf-8", newline="\n") as f:
         f.write(f"Crustal model                {model_description}\n")
         f.write("number of layers\n")
         f.write(f"{len(table)}\n")
@@ -1705,7 +1719,7 @@ def _write_axitra_crust_model(path: Path, layers: pd.DataFrame, description: str
     table = _axitra_table_from_layers(layers)
     path = Path(path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
+    with path.open("w", encoding="utf-8", newline="\n") as f:
         f.write(f"Crustal model                {description}\n")
         f.write("number of layers\n")
         f.write(f"{len(table)}\n")
@@ -2864,6 +2878,15 @@ def plot_cmt_summary(
     mt_obj = MomentTensor(*mt_plot, 0)
     T, N, P = mt2axes(mt_obj)
 
+    nodal_values = [
+        summary.get("NP1_strike_deg"), summary.get("NP1_dip_deg"), summary.get("NP1_rake_deg"),
+        summary.get("NP2_strike_deg"), summary.get("NP2_dip_deg"), summary.get("NP2_rake_deg"),
+    ]
+    has_nodal_planes = all(
+        value is not None and np.isfinite(float(value)) for value in nodal_values
+    )
+    draw_dc_overlay = bool(show_dc_overlay and has_nodal_planes)
+
     fig = plt.figure(figsize=figsize, dpi=dpi, constrained_layout=True)
     gs = fig.add_gridspec(1, 2, width_ratios=(1.05, 1.25))
     ax_ball = fig.add_subplot(gs[0])
@@ -2883,7 +2906,7 @@ def plot_cmt_summary(
     )
     ax_ball.add_collection(ball)
 
-    if show_dc_overlay:
+    if draw_dc_overlay:
         planes = beach(
             (summary["NP1_strike_deg"], summary["NP1_dip_deg"], summary["NP1_rake_deg"]),
             xy=(0, 0), width=2.0, size=300, linewidth=0.65,
@@ -2895,7 +2918,7 @@ def plot_cmt_summary(
         x, y = project_axis(axis)
         ax_ball.text(x, y, label, ha="center", va="center", fontsize=15, zorder=5)
 
-    if show_dc_overlay:
+    if draw_dc_overlay:
         np1_az, np2_az = choose_plane_label_azimuths(summary["NP1_strike_deg"], summary["NP2_strike_deg"])
         for label, azimuth in (("NP1", np1_az), ("NP2", np2_az)):
             x0, y0 = rim_xy(azimuth, 1.00)
@@ -2967,9 +2990,12 @@ def plot_cmt_summary(
             cell.get_text().set_fontweight("bold")
 
     ax_info.text(0.0, 0.375, "Nodal Planes", fontsize=11, fontweight="bold", transform=ax_info.transAxes)
+    def format_angle(value):
+        return f"{float(value):.1f}°" if value is not None and np.isfinite(float(value)) else "—"
+
     nodal_rows = [
-        ["NP1", f"{summary['NP1_strike_deg']:.1f}°", f"{summary['NP1_dip_deg']:.1f}°", f"{summary['NP1_rake_deg']:.1f}°"],
-        ["NP2", f"{summary['NP2_strike_deg']:.1f}°", f"{summary['NP2_dip_deg']:.1f}°", f"{summary['NP2_rake_deg']:.1f}°"],
+        ["NP1", format_angle(summary.get("NP1_strike_deg")), format_angle(summary.get("NP1_dip_deg")), format_angle(summary.get("NP1_rake_deg"))],
+        ["NP2", format_angle(summary.get("NP2_strike_deg")), format_angle(summary.get("NP2_dip_deg")), format_angle(summary.get("NP2_rake_deg"))],
     ]
     nodal_table = ax_info.table(
         cellText=nodal_rows, colLabels=["Plane", "Strike", "Dip", "Rake"],

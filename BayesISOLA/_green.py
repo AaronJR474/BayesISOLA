@@ -5,6 +5,7 @@ import multiprocessing as mp
 import numpy as np
 import os.path
 import hashlib
+from pathlib import Path
 from contextlib import nullcontext
 
 try:
@@ -41,7 +42,7 @@ def write_Greens_parameters(self):
 			f = green_path(self.d.green_dir, 'grdat-' + model + '.hed')
 		else:
 			f = green_path(self.d.green_dir, 'grdat.hed')
-		grdat = open(f, 'w')
+		grdat = open(f, 'w', encoding='utf-8', newline='\n')
 		grdat.write("&input\nnc=99\nnfreq={freq:d}\ntl={tl:1.2f}\naw=0.5\nnr={nr:d}\nns=1\nxl={xl:1.1f}\nikmax=100000\nuconv=0.1E-06\nfref=1.\n/end\n".format(freq=self.freq,tl=self.tl,nr=self.d.models[model], xl=self.xl)) # 'nc' is probably ignored in the current version of gr_xyz???
 		grdat.close()
 
@@ -66,43 +67,53 @@ def verify_Greens_parameters(self):
 	return True
 
 def verify_Greens_headers(self):
-	"""
-	Checked whether elementary-seismogram-metadata files (created when the Green's functions were calculated) agree with curent grid points positions.
-	Used to verify whether pre-calculated Green's functions were calculated on the same grid as used now.
-	"""
-	md5_crustal = hashlib.md5(open(green_path(self.d.green_dir, 'crustal.dat'), 'rb').read()).hexdigest()
-	md5_station = hashlib.md5(open(green_path(self.d.green_dir, 'station.dat'), 'rb').read()).hexdigest()
-	txt_soutype = open(green_path(self.d.green_dir, 'soutype.dat')).read().strip().replace('\n', '_')
-	problem = False
-	desc = ''
-	for g in range(len(self.grid.grid)):
-		gp = self.grid.grid[g]
+	"""Verify cached Axitra payloads and metadata for every grid point."""
+	md5_crustal = hashlib.md5(Path(green_path(self.d.green_dir, 'crustal.dat')).read_bytes()).hexdigest()
+	md5_station = hashlib.md5(Path(green_path(self.d.green_dir, 'station.dat')).read_bytes()).hexdigest()
+	txt_soutype = Path(green_path(self.d.green_dir, 'soutype.dat')).read_text(encoding='utf-8').strip().replace('\n', '_')
+
+	for g, gp in enumerate(self.grid.grid):
 		point_id = str(g).zfill(4)
+		payload = Path(green_path(self.d.green_dir, 'elemse' + point_id + '.dat'))
+		metadata = Path(green_path(self.d.green_dir, 'elemse' + point_id + '.txt'))
+
+		if not payload.is_file() or payload.stat().st_size == 0:
+			desc = 'Elementary-seismogram payload for grid point {0:d} was not found or is empty. '.format(g)
+			self.log(desc)
+			print(desc)
+			return False
+
 		try:
-			meta  = open(green_path(self.d.green_dir, 'elemse'+point_id+'.txt'), 'r')
-			lines = meta.readlines()
-			meta.close()
-		except:
-			problem = True
-			desc = 'Meta-data file for grid point {0:d} was not found. '.format(g)
-		else:
-			if len(lines)==0:
-				self.grid.grid[g]['err'] = 1
-				self.grid.grid[g]['VR'] = -10
-			elif lines[0] != '{0:1.3f} {1:1.3f} {2:1.3f} {3:s} {4:s} {5:s}'.format(gp['x']/1e3, gp['y']/1e3, gp['z']/1e3, md5_crustal, md5_station, txt_soutype):
-				problem = True
-		if problem:
-			if not desc:
-				l = lines[0].split()
-				desc = 'Pre-calculated grid point {0:d} was calculated with different parameters. '.format(g)
-				if l[0:3] != '{0:1.3f} {1:1.3f} {2:1.3f}'.format(gp['x']/1e3, gp['y']/1e3, gp['z']/1e3).split():
-					desc += 'Its coordinates differs, probably the shape of the grid was changed. '
-				if l[3] != md5_crustal:
-					desc += 'The Axitra crustal.dat file has a different hash, probably crustal model was changed. '
-				if l[4] != md5_station:
-					desc += 'The Axitra station.dat file has a different hash, probably station set was different. '
-				if l[5] != txt_soutype:
-					desc += 'Source time function (file soutype.txt) was different. '
+			text = metadata.read_text(encoding='utf-8').strip()
+		except (OSError, UnicodeError):
+			desc = 'Meta-data file for grid point {0:d} was not found or could not be read. '.format(g)
+			self.log(desc)
+			print(desc)
+			return False
+
+		if not text:
+			desc = 'Meta-data file for grid point {0:d} is empty. '.format(g)
+			self.log(desc)
+			print(desc)
+			return False
+
+		expected = '{0:1.3f} {1:1.3f} {2:1.3f} {3:s} {4:s} {5:s}'.format(
+			gp['x']/1e3, gp['y']/1e3, gp['z']/1e3, md5_crustal, md5_station, txt_soutype
+		)
+		if text != expected:
+			desc = 'Pre-calculated grid point {0:d} was calculated with different parameters. '.format(g)
+			fields = text.split()
+			if len(fields) < 6:
+				desc += 'Its metadata record is incomplete. '
+			else:
+				if fields[0:3] != expected.split()[0:3]:
+					desc += 'Its coordinates differ, probably the shape of the grid was changed. '
+				if fields[3] != md5_crustal:
+					desc += 'The Axitra crustal.dat file has a different hash, probably the crustal model was changed. '
+				if fields[4] != md5_station:
+					desc += 'The Axitra station.dat file has a different hash, probably the station set was different. '
+				if fields[5] != txt_soutype:
+					desc += 'Source time function (file soutype.dat) was different. '
 			self.log(desc)
 			print(desc)
 			return False
@@ -144,7 +155,7 @@ def calculate_Green(self):
 	green_dir = str(self.d.green_dir)
 	gr_xyz_executable = str(axitra_executable('gr_xyz'))
 	elemse_executable = str(axitra_executable('elemse'))
-	open(logfile, "w").close() # erase file contents
+	open(logfile, "w", encoding="utf-8", newline="\n").close() # erase file contents
 	show_progress = bool(getattr(self, 'progress', True)) and tqdm is not None
 	# run `gr_xyz` aand `elemse`
 	for model in self.d.models:
@@ -164,7 +175,10 @@ def calculate_Green(self):
 			indices = tqdm(range(len(grid)), desc=desc, unit='pt') if show_progress else range(len(grid))
 			for i in indices:
 				gp = grid[i]
-				Axitra_wrapper(i, model, gp['x'], gp['y'], gp['z'], self.npts_exp, self.elemse_start_origin, logfile, green_dir, gr_xyz_executable, elemse_executable)
+				ok = Axitra_wrapper(i, model, gp['x'], gp['y'], gp['z'], self.npts_exp, self.elemse_start_origin, logfile, green_dir, gr_xyz_executable, elemse_executable)
+				if not ok:
+					gp['err'] = 1
+					gp['VR'] = -10
 
 def use_elemse_from_files(self, path):
 	"""

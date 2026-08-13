@@ -1,7 +1,7 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os.path
+from pathlib import Path
 
 from BayesISOLA._paths import default_green_dir, prepare_green_workspace
 
@@ -60,10 +60,13 @@ class load_data:
 	#from BayesISOLA._input_parameters import set_frequencies, set_working_sampling
 
 	def __init__(self, outdir='output', logfile='$outdir/log.txt', output_mkdir=True, green_dir=None):
-		self.outdir = str(outdir)
-		if not os.path.exists(self.outdir) and output_mkdir:
-			os.mkdir(self.outdir)
-		self.logfile = open(logfile.replace('$outdir', self.outdir), 'w', 1)
+		self.outdir = str(Path(outdir).expanduser())
+		if output_mkdir:
+			Path(self.outdir).mkdir(parents=True, exist_ok=True)
+		self.logfile = open(
+			logfile.replace('$outdir', self.outdir), 'w', buffering=1,
+			encoding='utf-8', newline='\n',
+		)
 		self.green_dir = prepare_green_workspace(green_dir if green_dir is not None else default_green_dir(self.outdir))
 		self.data_raw = []
 		self.data_deltas = [] # list of ``stats.delta`` values of traces in ``self.data`` or ``self.data_raw``
