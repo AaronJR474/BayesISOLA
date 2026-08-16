@@ -70,3 +70,17 @@ def test_load_data_creates_nested_output_and_writes_utf8_log(tmp_path):
     assert (outdir / "green" / "soutype.dat").is_file()
     text = (outdir / "log.txt").read_text(encoding="utf-8")
     assert "Vackář — Gallovič — Burjánek" in text
+
+def test_load_data_close(tmp_path):
+    data = BayesISOLA.load_data(outdir=tmp_path)
+
+    assert not data.logfile.closed
+
+    data.close()
+
+    assert data.logfile.closed
+
+    # Repeated close must be safe.
+    data.close()
+
+    assert data.logfile.closed

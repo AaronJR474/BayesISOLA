@@ -74,12 +74,19 @@ class load_data:
 		self.models = {}
 		self.stf_description = ""
 
+	def close(self):
+		"""Close file handles owned by this input object."""
+		logfile = getattr(self, "logfile", None)
+
+		if logfile is not None and not logfile.closed:
+			logfile.flush()
+			logfile.close()
+
 	def __exit__(self, exc_type, exc_value, traceback):
-		self.__del__()
-		
+		self.close()
+
 	def __del__(self):
-		self.logfile.close()
-		del self.data_raw
+		self.close()
 
 	def log(self, s, newline=True, printcopy=False):
 		"""

@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "BayesISOLA"
-version = "0.1.0"
+version = "0.1.1"
 description = "Centroid moment-tensor inversion with BayesISOLA"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 dependencies = [
     "matplotlib",
     "numpy",
-    "obspy",
+    "obspy>=1.5.0",
     "pandas",
     "pyproj",
     "requests",
