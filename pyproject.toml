@@ -45,6 +45,7 @@ sdist.include = [
     "docs/**",
     "CMakeLists.txt",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     ".gitattributes",
     ".gitignore",
