@@ -5,7 +5,7 @@ BayesISOLA is an independently maintained Python package for centroid moment-ten
 
 ## Installation
 
-BayesISOLA requires Python 3.10 or newer. The 0.1.0 release wheels are tested on Python 3.10–3.14.
+BayesISOLA requires Python 3.10 or newer. The 0.2.0 release wheels are tested on Python 3.10–3.14.
 
 ### Recommended: install a release wheel
 
@@ -14,7 +14,7 @@ For Windows x86_64 and Linux x86_64, the recommended installation is a pre-built
 Download the wheel for your platform and install it with:
 
 ```bash
-python -m pip install /path/to/bayesisola-0.1.0-<platform>.whl
+python -m pip install /path/to/bayesisola-0.2.0-<platform>.whl
 ```
 
 The release wheels already contain the compiled Axitra `gr_xyz` and `elemse` executables and their required non-system runtime libraries. **A Fortran compiler, CMake, MinGW, and manual Axitra compilation are not required for normal wheel installation.**
@@ -66,16 +66,20 @@ from BayesISOLA.workflows import run_auto_cmt
 
 1. event definition and source-time function;
 2. station discovery or loading of an existing station table;
-3. FDSN waveform/response acquisition or reuse of local miniSEED + StationXML;
-4. magnitude-dependent station-radius and waveform-window selection;
-5. BayesISOLA waveform quality control and preprocessing;
-6. automatic space-time centroid-grid construction;
-7. velocity-model preparation and Green's-function calculation/reuse;
-8. noise covariance weighting or the unweighted BayesISOLA branch;
-9. full or deviatoric moment-tensor inversion;
-10. curated result tables, grid-edge diagnostics and figures.
+3. magnitude- and distance-dependent channel-family selection, explicit station drops and optional azimuthal thinning;
+4. FDSN waveform/response acquisition or reuse of local miniSEED + StationXML;
+5. magnitude-dependent station-radius and waveform-window selection;
+6. BayesISOLA waveform quality control and preprocessing;
+7. automatic space-time centroid-grid construction;
+8. velocity-model preparation and Green's-function calculation/reuse;
+9. noise covariance weighting or the unweighted BayesISOLA branch;
+10. native full or deviatoric moment-tensor inversion;
+11. optional bounded Axitra adaptive-grid expansion/refinement;
+12. exact final-grid discrete posterior construction and conditional moment-tensor uncertainty sampling;
+13. optional exact fixed-grid leave-one-station-out robustness diagnostics;
+14. curated result tables, diagnostic figures, native HTML and workflow-level HTML reporting.
 
-Remote acquisition supports ordered FDSN-client fallback. Local and remote waveform branches converge on the same local-data loading and inversion path.
+Remote acquisition supports ordered FDSN-client fallback. Local and remote waveform branches converge on the same local-data loading and inversion path. Version 0.2.0 retains the native BayesISOLA point-source inverse problem while adding these workflow-level search, posterior, station-control and reporting layers.
 
 ### Velocity models and Green's functions
 
@@ -119,15 +123,15 @@ Green's-function reuse is controlled consistently by `use_precalculated_Green`:
 
 The automated workflow retains the native BayesISOLA solution objects but also exposes a curated results layer containing:
 
-- centroid location and time-shift information;
-- moment-tensor/source summary;
+- centroid location, source-time shift and moment-tensor/source summaries;
 - per-station and per-component fit information;
-- grid-edge diagnostics;
-- optional posterior uncertainty samples and diagnostics;
-- output paths and figure paths;
-- Green's-function backend/cache metadata in `run["gf"]`.
+- the exact final-grid discrete space-time posterior and posterior diagnostics;
+- optional conditional moment-tensor uncertainty samples and diagnostics;
+- adaptive-grid search history and active-boundary diagnostics;
+- station-selection audit information and optional exact fixed-grid station jackknife results;
+- output paths, diagnostic figure paths and Green's-function backend/cache metadata in `run["gf"]`.
 
-The `summary` plotting preset adds a compact CMT summary while keeping native BayesISOLA diagnostics available through the full plotting path.
+`plot_preset="summary"` writes the maintained workflow diagnostic suite, while `plot_preset="full"` additionally requests the historical native BayesISOLA plot suite. `html_output=True` independently writes the native BayesISOLA `index.html` using its original complete plotting defaults; `write_report=True` writes the curated v0.2 `report.html`.
 
 ### Validation and release testing
 
@@ -183,9 +187,9 @@ examples/run_auto_cmt_example.ipynb
 Its public helpers cover four main areas:
 
 - **Station and waveform acquisition:** `get_max_radius`, `discover_stations`, `get_network_file`, `write_network_file`, `get_mseed_stationxml`, `get_waveform_window`, `load_streams_fdsnws_auto`, and `load_streams_local`.
-- **Quality control and grid diagnostics:** `plot_waveform_section`, `plot_station_section`, `suggest_depth_limits`, and `diagnose_grid_edge`.
-- **Results extraction and reporting:** `extract_station_fit_df`, `extract_centroid_location`, `extract_solution_summary`, `extract_uncertainty_df`, `write_solution_outputs`, and `plot_cmt_summary`.
-- **End-to-end orchestration:** `run_auto_cmt` and the `PLOT_PRESETS` configuration.
+- **Quality control and grid diagnostics:** `plot_waveform_section`, `plot_station_section`, `suggest_depth_limits`, `diagnose_grid_edge`, adaptive-search controls, azimuth controls and station jackknife diagnostics.
+- **Results extraction and reporting:** `extract_station_fit_df`, `extract_centroid_location`, `extract_solution_summary`, `extract_uncertainty_df`, `write_solution_outputs`, the maintained diagnostic plotting functions, and the curated HTML report.
+- **End-to-end orchestration:** `run_auto_cmt`, `PLOT_PRESETS`, independent native `html_output`, and workflow-level `write_report`.
 
 See [`docs/BayesISOLA.workflows.rst`](docs/BayesISOLA.workflows.rst) for a fuller description and the generated API reference.
 
