@@ -50,6 +50,7 @@ def _invert_worker(task):
 		covariance_factors=s["covariance_factors"],
 		data_whitened=s["data_whitened"],
 		green_dir=s["green_dir"],
+		store_station_normal_equations=s["store_station_normal_equations"],
 	)
 
 
@@ -207,6 +208,9 @@ def run_inversion(self):
 			"covariance_factors": covariance_factors,
 			"data_whitened": data_whitened,
 			"green_dir": str(self.inp.green_dir),
+			"store_station_normal_equations": bool(
+				getattr(self.d, "_store_station_normal_equations", False)
+			),
 		}
 		with mp.Pool(processes=self.threads, initializer=_init_inversion_worker, initargs=(state, 1)) as pool:
 			progress_context = tqdm(total=len(todo), desc='Moment-tensor inversion', unit='pt') if show_progress else nullcontext()
@@ -221,10 +225,21 @@ def run_inversion(self):
 		output = []
 		indices = tqdm(todo, desc='Moment-tensor inversion', unit='pt') if show_progress else todo
 		for i in indices:
-			res = invert(grid[i]['id'], d_shifts, norm_d, Cd_inv, Cd_inv_shifts, self.inp.nr, self.d.components, self.inp.stations, self.d.npts_elemse, self.d.npts_slice, self.d.elemse_start_origin, self.inp.event['t'], self.d.samprate, self.deviatoric, self.decompose, self.d.invert_displacement, grid[i]['path'], covariance_factors=covariance_factors, data_whitened=data_whitened, green_dir=self.inp.green_dir)
+			res = invert(
+				grid[i]['id'], d_shifts, norm_d, Cd_inv, Cd_inv_shifts,
+				self.inp.nr, self.d.components, self.inp.stations,
+				self.d.npts_elemse, self.d.npts_slice, self.d.elemse_start_origin,
+				self.inp.event['t'], self.d.samprate, self.deviatoric, self.decompose,
+				self.d.invert_displacement, grid[i]['path'],
+				covariance_factors=covariance_factors, data_whitened=data_whitened,
+				green_dir=self.inp.green_dir,
+				store_station_normal_equations=bool(
+					getattr(self.d, "_store_station_normal_equations", False)
+				),
+			)
 			output.append(res)
-	for i in todo:
-		grid[i].update(output[todo.index(i)])
+	for i, result in zip(todo, output):
+		grid[i].update(result)
 		grid[i]['shift_idx'] = grid[i]['shift']
 		#grid[i]['shift'] = self.g.shift_min + grid[i]['shift']*self.g.SHIFT_step/self.d.max_samprate
 		grid[i]['shift'] = self.d.shifts[grid[i]['shift']]

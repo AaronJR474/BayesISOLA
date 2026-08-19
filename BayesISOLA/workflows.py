@@ -1,43 +1,22 @@
-"""Workflow helpers for automated BayesISOLA centroid-moment-tensor inversion.
+"""High-level workflows for automated BayesISOLA CMT inversion.
 
-Version 0.1.8 makes ``use_precalculated_Green`` the single backend-independent
-Green's-function cache policy. ``False`` forces regeneration, ``"auto"`` reuses
-compatible outputs and regenerates missing/incompatible outputs, and ``True``
-requires a complete compatible cache and raises rather than generating anything.
-Syngine's backend-specific ``gf_options["overwrite"]`` control is therefore removed;
-cache/reuse policy is no longer duplicated inside backend options. ``run["gf"]`` now
-records the resolved cache policy explicitly. No Green's-function mathematics,
-station/path model construction, acquisition, covariance weighting or inversion
-algorithm is changed.
+Version 0.2.0 extends the validated native BayesISOLA/Axitra inversion with
+bounded adaptive centroid searches, exact discrete posterior outputs, calibrated
+conditional moment-tensor sampling, station-selection controls, fast exact
+fixed-grid station jackknife diagnostics, workflow-level diagnostic figures and
+curated HTML reporting.  Native BayesISOLA plotting and ``plot.html_log()`` are
+retained independently for backward-compatible scientific inspection.
 
-Version 0.1.7 adds an explicit Green's-function backend contract while preserving
-``gf_source='axitra', gf_options=None`` as the validated historical path. Native
-Axitra can now derive station-dependent layered models from a ``gf_helpers`` 3-D
-velocity grid using either a vertical profile at each receiver (``grid='station'``)
-or a representative catalogue-event-to-station path profile (``grid='path'``).
-Model identifiers are written through BayesISOLA's native optional network field,
-exact duplicate profiles are grouped, and model-specific cache metadata are checked
-against the actual crust/station files used by Axitra. The corrected EarthScope
-Syngine backend is available through ``gf_source='syngine'`` and writes the same six
-elementary-seismogram interface consumed by the unchanged BayesISOLA inversion.
-Every run returns first-class backend metadata in ``run['gf']``.
-
-Version 0.1.7 also removes posterior ``±`` values from the custom CMT summary.
-Optional BayesISOLA uncertainty sampling remains available as a separate diagnostic
-table/output when ``n_uncertainty`` is requested, but it is not mixed into the
-deterministic source-summary figure and native uncertainty plotting remains disabled
-in the helper presets.
-
-The 0.1.6 acquisition/results path is otherwise retained: ordered multi-client FDSN
-fallback, magnitude-based station radii, origin-centred waveform windows, reusable
-local miniSEED/StationXML input, pre-inversion waveform screening, explicit
-noise/no-covariance branches, curated result tables and deterministic plotting.
+The workflow layer coordinates these capabilities without changing the native
+point-source moment-tensor parameterization or Axitra Green-function algorithms.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import math
 import shutil
 import hashlib
@@ -46,8 +25,19 @@ import io
 import numpy as np
 import pandas as pd
 
+from BayesISOLA._diagnostics import (
+    plot_adaptive_history,
+    plot_cmt_summary,
+    plot_posterior_summary,
+    plot_station_fit_summary,
+    plot_station_qc,
+    plot_uncertainty_summary,
+    summarize_uncertainty,
+)
+from BayesISOLA._report import write_html_report
 
-__version__ = "0.1.8"
+
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
@@ -63,12 +53,23 @@ __all__ = [
     "plot_station_section",
     "suggest_depth_limits",
     "diagnose_grid_edge",
+    "compute_grid_expansion",
+    "compute_grid_refinement",
+    "build_posterior_cells",
+    "compute_posterior_diagnostics",
     "extract_station_fit_df",
     "extract_centroid_location",
     "extract_solution_summary",
     "extract_uncertainty_df",
     "write_solution_outputs",
     "plot_cmt_summary",
+    "plot_posterior_summary",
+    "plot_adaptive_history",
+    "plot_station_qc",
+    "summarize_uncertainty",
+    "plot_uncertainty_summary",
+    "plot_station_fit_summary",
+    "write_html_report",
     "PLOT_PRESETS",
     "run_auto_cmt",
 ]
@@ -173,8 +174,15 @@ def _depth_bounds_km(
     min_depth_km: float,
     min_depth_multiplier: float,
     max_depth_multiplier: float,
+    grid_min_depth_km: float | None = None,
+    grid_max_depth_km: float | None = None,
 ) -> tuple[float, float]:
-    """Resolve the explicit BayesISOLA depth limits used by both grid and acquisition."""
+    """Resolve BayesISOLA depth limits, with optional explicit overrides.
+
+    ``None`` preserves the automated 0.1.1 depth bounds.  Explicit bounds are
+    useful for controlled/adaptive reruns and are still constrained by the
+    absolute ``min_depth_km`` floor on the shallow side.
+    """
     catalog_depth_km = float(catalog_depth_km)
     min_depth_km = float(min_depth_km)
     min_depth_multiplier = float(min_depth_multiplier)
@@ -190,15 +198,26 @@ def _depth_bounds_km(
     if max_depth_multiplier <= 1.0:
         raise ValueError("max_depth_multiplier must be > 1.")
 
-    grid_min_depth_km = max(min_depth_km, catalog_depth_km * min_depth_multiplier)
-    grid_max_depth_km = catalog_depth_km * max_depth_multiplier
-    if grid_max_depth_km <= grid_min_depth_km:
-        raise ValueError(
-            "The requested depth controls give grid_max_depth_km <= grid_min_depth_km. "
-            "Increase max_depth_multiplier or reduce min_depth_km/min_depth_multiplier."
-        )
-    return grid_min_depth_km, grid_max_depth_km
+    auto_min = max(min_depth_km, catalog_depth_km * min_depth_multiplier)
+    auto_max = catalog_depth_km * max_depth_multiplier
 
+    if grid_min_depth_km is None:
+        resolved_min = auto_min
+    else:
+        resolved_min = max(min_depth_km, float(grid_min_depth_km))
+
+    if grid_max_depth_km is None:
+        resolved_max = auto_max
+    else:
+        resolved_max = float(grid_max_depth_km)
+
+    if not np.isfinite([resolved_min, resolved_max]).all():
+        raise ValueError("Explicit grid depth bounds must be finite or None.")
+    if resolved_max <= resolved_min:
+        raise ValueError(
+            "The requested depth controls give grid_max_depth_km <= grid_min_depth_km."
+        )
+    return resolved_min, resolved_max
 
 def _waveform_window_from_bounds(
     max_distance_km: float,
@@ -322,6 +341,458 @@ def _coerce_station_df(station_df: pd.DataFrame | str | Path) -> pd.DataFrame:
     return table
 
 
+
+
+
+ChannelPriority = Sequence[str] | Mapping[str, Any]
+
+_CHANNEL_PRIORITY_RULE_KEYS = {"mag_range", "dist_range", "channels", "default"}
+
+
+def _channel_prefixes_from_patterns(channels: Sequence[str]) -> tuple[str, ...]:
+    """Return ordered two-character channel families implied by FDSN patterns.
+
+    The first two characters of each channel pattern define the family used by
+    BayesISOLA (for example ``HH?`` -> ``HH`` and ``HN?`` -> ``HN``). Duplicate
+    families are removed while preserving the caller's order.
+    """
+    prefixes: list[str] = []
+    for pattern in channels:
+        text = str(pattern).strip()
+        if len(text) < 2 or any(char in "?*" for char in text[:2]):
+            raise ValueError(
+                f"Channel pattern {pattern!r} must begin with a literal two-character family prefix."
+            )
+        prefix = text[:2]
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+    if not prefixes:
+        raise ValueError("channels cannot be empty.")
+    return tuple(prefixes)
+
+
+def _validate_priority_prefixes(values: Sequence[str], *, name: str) -> tuple[str, ...]:
+    """Normalize and validate one ordered channel-family priority sequence."""
+    if isinstance(values, str):
+        raise TypeError(f"{name} must be a sequence of two-character prefixes, not a string.")
+    prefixes = tuple(str(value).strip() for value in values)
+    if not prefixes:
+        raise ValueError(f"{name} cannot be empty.")
+    if any(len(prefix) != 2 for prefix in prefixes):
+        raise ValueError(f"{name} entries must be two-character prefixes.")
+    if len(set(prefixes)) != len(prefixes):
+        raise ValueError(f"{name} cannot contain duplicate prefixes.")
+    return prefixes
+
+
+def _normalize_channel_priority(
+    channel_priority: ChannelPriority,
+    channels: Sequence[str],
+) -> dict[str, Any]:
+    """Normalize static or magnitude/distance-dependent channel priority.
+
+    ``channel_priority`` retains its historical ordered-sequence form, e.g.::
+
+        ("HH", "BH", "LH")
+
+    It may alternatively be a mapping containing parallel ``mag_range``,
+    ``dist_range`` and ``channels`` rule lists, with an optional ``default``
+    priority::
+
+        {
+            "mag_range": [[4.0, 5.0], [5.0, 6.0]],
+            "dist_range": [[10, 250], [40, 300]],
+            "channels": [["BH", "HH"], ["HN", "BN"]],
+        }
+
+    Rule ranges use half-open intervals ``[minimum, maximum)`` and the first
+    matching rule wins. A rule changes precedence, not exclusivity: if its named
+    families are unavailable, the station falls back through the default order.
+    When ``default`` is omitted, that fallback is inferred from the caller's
+    ordered FDSN ``channels`` patterns.
+
+    In rule mode only, family prefixes named by a rule/default but absent from the
+    outer ``channels`` patterns are automatically added to the metadata query as
+    ``XX?``. This lets the mapping be self-contained. Historical sequence mode is
+    left unchanged and does not alter the caller's FDSN query patterns.
+    """
+    channel_patterns = tuple(str(value).strip() for value in channels)
+    if not channel_patterns or any(not value for value in channel_patterns):
+        raise ValueError("channels cannot be empty or contain empty patterns.")
+
+    if not isinstance(channel_priority, Mapping):
+        priority = _validate_priority_prefixes(channel_priority, name="channel_priority")
+        return {
+            "mode": "static",
+            "eligible": priority,
+            "default": priority,
+            "rules": (),
+            "query_patterns": channel_patterns,
+        }
+
+    explicit_prefixes = _channel_prefixes_from_patterns(channel_patterns)
+    unknown = sorted(set(channel_priority) - _CHANNEL_PRIORITY_RULE_KEYS)
+    if unknown:
+        raise ValueError(
+            f"Unknown channel_priority rule key(s): {', '.join(map(str, unknown))}. "
+            f"Allowed keys are: {', '.join(sorted(_CHANNEL_PRIORITY_RULE_KEYS))}."
+        )
+
+    required = {"mag_range", "dist_range", "channels"}
+    missing_keys = sorted(required - set(channel_priority))
+    if missing_keys:
+        raise ValueError(
+            "Rule-based channel_priority requires key(s): " + ", ".join(missing_keys)
+        )
+
+    mag_ranges = list(channel_priority["mag_range"])
+    dist_ranges = list(channel_priority["dist_range"])
+    rule_priorities = list(channel_priority["channels"])
+    if not mag_ranges:
+        raise ValueError("Rule-based channel_priority must contain at least one rule.")
+    if not (len(mag_ranges) == len(dist_ranges) == len(rule_priorities)):
+        raise ValueError(
+            "channel_priority mag_range, dist_range and channels must have equal lengths."
+        )
+
+    default = _validate_priority_prefixes(
+        channel_priority.get("default", explicit_prefixes),
+        name="channel_priority['default']",
+    )
+
+    parsed_rules: list[dict[str, Any]] = []
+    eligible_order = list(default)
+    for index, (mag_range, dist_range, priority_values) in enumerate(
+        zip(mag_ranges, dist_ranges, rule_priorities)
+    ):
+        if len(mag_range) != 2 or len(dist_range) != 2:
+            raise ValueError(
+                f"channel_priority rule {index} magnitude and distance ranges must each contain [min, max]."
+            )
+        mag_min, mag_max = map(float, mag_range)
+        dist_min, dist_max = map(float, dist_range)
+        if not np.isfinite([mag_min, mag_max, dist_min, dist_max]).all():
+            raise ValueError(f"channel_priority rule {index} ranges must be finite.")
+        if mag_min >= mag_max:
+            raise ValueError(f"channel_priority rule {index} requires mag_min < mag_max.")
+        if dist_min < 0.0 or dist_min >= dist_max:
+            raise ValueError(
+                f"channel_priority rule {index} requires 0 <= dist_min < dist_max."
+            )
+
+        priority = _validate_priority_prefixes(
+            priority_values,
+            name=f"channel_priority['channels'][{index}]",
+        )
+        for prefix in priority:
+            if prefix not in eligible_order:
+                eligible_order.append(prefix)
+        parsed_rules.append({
+            "index": index,
+            "mag_min": mag_min,
+            "mag_max": mag_max,
+            "dist_min": dist_min,
+            "dist_max": dist_max,
+            "requested_priority": priority,
+        })
+
+    rules: list[dict[str, Any]] = []
+    for rule in parsed_rules:
+        priority = tuple(rule["requested_priority"])
+        resolved = priority + tuple(prefix for prefix in default if prefix not in priority)
+        rules.append({
+            "index": int(rule["index"]),
+            "mag_min": float(rule["mag_min"]),
+            "mag_max": float(rule["mag_max"]),
+            "dist_min": float(rule["dist_min"]),
+            "dist_max": float(rule["dist_max"]),
+            "priority": resolved,
+        })
+
+    query_patterns = list(channel_patterns)
+    queried_prefixes = list(explicit_prefixes)
+    for prefix in eligible_order:
+        if prefix not in queried_prefixes:
+            query_patterns.append(f"{prefix}?")
+            queried_prefixes.append(prefix)
+
+    return {
+        "mode": "rules",
+        "eligible": tuple(eligible_order),
+        "default": default,
+        "rules": tuple(rules),
+        "query_patterns": tuple(query_patterns),
+    }
+
+def _resolve_channel_priority(
+    config: Mapping[str, Any],
+    *,
+    magnitude: float | None,
+    distance_km: float | None,
+) -> tuple[tuple[str, ...], int | None]:
+    """Return the priority order and matching rule index for one station.
+
+    Rule evaluation requires both a finite event magnitude and station distance.
+    If either is unavailable, the normalized default order is used.
+    """
+    default = tuple(config["default"])
+    if config.get("mode") != "rules" or magnitude is None or distance_km is None:
+        return default, None
+
+    magnitude = float(magnitude)
+    distance_km = float(distance_km)
+    if not np.isfinite([magnitude, distance_km]).all():
+        return default, None
+
+    for rule in config["rules"]:
+        if (
+            float(rule["mag_min"]) <= magnitude < float(rule["mag_max"])
+            and float(rule["dist_min"]) <= distance_km < float(rule["dist_max"])
+        ):
+            return tuple(rule["priority"]), int(rule["index"])
+    return default, None
+
+_AZIMUTH_CONTROL_DEFAULTS: dict[str, Any] = {
+    "azimuth_selection": True,
+    "azimuth_min_sectors": 3,
+    "azimuth_max_stations_per_sector": 2,
+    "minimum_stations": 4,
+}
+
+
+def _normalize_azimuth_control(
+    azimuth_control: bool | Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Normalize optional GISOLA-style azimuthal station selection.
+
+    ``None``/``False`` disables selection, ``True`` uses the defaults, and a
+    mapping enables selection while overriding only named defaults.  The sector
+    width is deliberately fixed at GISOLA's 45 degrees (eight sectors); channel
+    family preference remains the caller's existing ``channel_priority``.
+    """
+    if azimuth_control is None or azimuth_control is False:
+        config = dict(_AZIMUTH_CONTROL_DEFAULTS)
+        config["azimuth_selection"] = False
+        return config
+    if azimuth_control is True:
+        config = dict(_AZIMUTH_CONTROL_DEFAULTS)
+    elif isinstance(azimuth_control, Mapping):
+        unknown = sorted(set(azimuth_control) - set(_AZIMUTH_CONTROL_DEFAULTS))
+        if unknown:
+            allowed = ", ".join(_AZIMUTH_CONTROL_DEFAULTS)
+            raise ValueError(
+                f"Unknown azimuth_control option(s): {', '.join(map(str, unknown))}. "
+                f"Allowed keys are: {allowed}."
+            )
+        config = dict(_AZIMUTH_CONTROL_DEFAULTS)
+        config.update(dict(azimuth_control))
+    else:
+        raise TypeError("azimuth_control must be None, a boolean, or a mapping.")
+
+    config["azimuth_selection"] = bool(config["azimuth_selection"])
+    config["azimuth_min_sectors"] = int(config["azimuth_min_sectors"])
+    config["azimuth_max_stations_per_sector"] = int(config["azimuth_max_stations_per_sector"])
+    config["minimum_stations"] = int(config["minimum_stations"])
+    if not 1 <= config["azimuth_min_sectors"] <= 8:
+        raise ValueError("azimuth_min_sectors must lie within [1, 8].")
+    if config["azimuth_max_stations_per_sector"] < 1:
+        raise ValueError("azimuth_max_stations_per_sector must be >= 1.")
+    if config["minimum_stations"] < 1:
+        raise ValueError("minimum_stations must be >= 1.")
+    return config
+
+
+def _station_identity(row: Mapping[str, Any]) -> str:
+    """Return a normalized ``NET.STA.LOC`` identity for one station row."""
+    location = _normalize_location(row.get("location"))
+    return f"{str(row.get('network', '')).strip()}.{str(row.get('station', '')).strip()}.{location or '--'}"
+
+
+def _station_drop_mask(table: pd.DataFrame, specification: str) -> np.ndarray:
+    """Return the unique station-row mask addressed by one drop specification.
+
+    Accepted forms are ``STA``, ``NET.STA`` and ``NET.STA.LOC``.  Bare or
+    two-field identifiers must resolve to one network/station/location identity;
+    this avoids silently dropping multiple unrelated stations when codes collide.
+    """
+    specification = str(specification).strip()
+    if not specification:
+        raise ValueError("drop_stations cannot contain empty station identifiers.")
+    parts = specification.split(".")
+    network = table["network"].astype(str).str.strip()
+    station = table["station"].astype(str).str.strip()
+    locations = table["location"].map(_normalize_location)
+
+    if len(parts) == 1:
+        mask = station.eq(parts[0]).to_numpy()
+    elif len(parts) == 2:
+        mask = (network.eq(parts[0]) & station.eq(parts[1])).to_numpy()
+    elif len(parts) == 3:
+        location = _normalize_location(parts[2])
+        mask = (network.eq(parts[0]) & station.eq(parts[1]) & locations.eq(location)).to_numpy()
+    else:
+        raise ValueError(
+            f"Invalid drop_stations identifier {specification!r}; use STA, NET.STA or NET.STA.LOC."
+        )
+
+    if not np.any(mask):
+        raise ValueError(f"Requested drop station {specification!r} did not match any retained station.")
+    identities = {_station_identity(row) for row in table.loc[mask].to_dict("records")}
+    if len(identities) != 1:
+        raise ValueError(
+            f"Requested drop station {specification!r} is ambiguous across {sorted(identities)}; "
+            "use NET.STA.LOC."
+        )
+    return mask
+
+
+def _ensure_station_geometry(
+    table: pd.DataFrame,
+    *,
+    event_lat: float,
+    event_lon: float,
+) -> pd.DataFrame:
+    """Ensure finite distance/azimuth columns using authoritative station coordinates."""
+    table = table.copy()
+    if "distance_km" not in table:
+        table["distance_km"] = np.nan
+    if "azimuth_deg" not in table:
+        table["azimuth_deg"] = np.nan
+
+    for index, row in table.iterrows():
+        distance = pd.to_numeric(pd.Series([row.get("distance_km")]), errors="coerce").iloc[0]
+        azimuth = pd.to_numeric(pd.Series([row.get("azimuth_deg")]), errors="coerce").iloc[0]
+        if np.isfinite(distance) and np.isfinite(azimuth):
+            table.at[index, "distance_km"] = float(distance)
+            table.at[index, "azimuth_deg"] = float(azimuth) % 360.0
+            continue
+        if "station_lat" not in row or "station_lon" not in row:
+            raise KeyError(
+                "Azimuth selection requires distance_km/azimuth_deg or station_lat/station_lon."
+            )
+        from obspy.geodetics.base import gps2dist_azimuth
+        station_lat = float(row["station_lat"])
+        station_lon = float(row["station_lon"])
+        if not np.isfinite([station_lat, station_lon]).all():
+            raise ValueError("Station coordinates must be finite for azimuth selection.")
+        distance_m, azimuth, _ = gps2dist_azimuth(
+            float(event_lat), float(event_lon), station_lat, station_lon
+        )
+        table.at[index, "distance_km"] = float(distance_m) / 1000.0
+        table.at[index, "azimuth_deg"] = float(azimuth) % 360.0
+    return table
+
+
+def _apply_station_controls(
+    station_df: pd.DataFrame | str | Path,
+    *,
+    drop_stations: Sequence[str] | str | None,
+    azimuth_config: Mapping[str, Any],
+    channel_priority: ChannelPriority,
+    channels: Sequence[str],
+    magnitude: float | None,
+    event_lat: float,
+    event_lon: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Apply manual drops first, then optional eight-sector azimuthal thinning.
+
+    Channel-family ranking is evaluated per station so magnitude/distance-based
+    ``channel_priority`` rules are respected consistently by the azimuth selector.
+    """
+    table = _coerce_station_df(station_df).reset_index(drop=True)
+    table = _ensure_station_geometry(table, event_lat=event_lat, event_lon=event_lon)
+    audit = table.copy()
+    audit["selection_status"] = "selected"
+    audit["selection_reason"] = ""
+    audit["azimuth_sector"] = np.floor((audit["azimuth_deg"].astype(float) % 360.0) / 45.0).astype(int)
+
+    priority_config = _normalize_channel_priority(channel_priority, channels)
+    prefixes = audit.get("channel_prefix", pd.Series("", index=audit.index)).astype(str).str[:2]
+    priority_ranks = []
+    priority_rules = []
+    for prefix, distance_km in zip(prefixes, audit["distance_km"]):
+        order, rule_index = _resolve_channel_priority(
+            priority_config, magnitude=magnitude, distance_km=float(distance_km)
+        )
+        lookup = {value: rank for rank, value in enumerate(order)}
+        priority_ranks.append(lookup.get(prefix, len(lookup)))
+        priority_rules.append(rule_index)
+    audit["channel_priority_rank"] = priority_ranks
+    audit["channel_priority_rule"] = priority_rules
+
+    dropped_indices: set[int] = set()
+    if drop_stations is not None:
+        specifications = [drop_stations] if isinstance(drop_stations, str) else list(drop_stations)
+        for specification in specifications:
+            active = audit.loc[~audit.index.isin(dropped_indices)]
+            mask_local = _station_drop_mask(active, specification)
+            matched_indices = active.index[np.asarray(mask_local, dtype=bool)].tolist()
+            dropped_indices.update(matched_indices)
+            audit.loc[matched_indices, "selection_status"] = "manual_drop"
+            audit.loc[matched_indices, "selection_reason"] = f"drop_stations={str(specification).strip()}"
+
+    candidate = audit.loc[~audit.index.isin(dropped_indices)].copy()
+    if candidate.empty:
+        raise ValueError("No stations remain after applying drop_stations.")
+
+    if bool(azimuth_config["azimuth_selection"]):
+        occupied = int(candidate["azimuth_sector"].nunique())
+        if occupied < int(azimuth_config["azimuth_min_sectors"]):
+            raise ValueError(
+                f"Azimuthal coverage has {occupied} occupied 45-degree sectors, below "
+                f"azimuth_min_sectors={int(azimuth_config['azimuth_min_sectors'])}."
+            )
+
+        selected_indices: list[int] = []
+        max_per_sector = int(azimuth_config["azimuth_max_stations_per_sector"])
+        for _, sector in candidate.groupby("azimuth_sector", sort=True):
+            ordered = sector.sort_values(
+                ["channel_priority_rank", "distance_km", "network", "station", "location"],
+                kind="stable",
+            )
+            selected_indices.extend(ordered.index[:max_per_sector].tolist())
+
+        excluded = candidate.index.difference(selected_indices)
+        audit.loc[excluded, "selection_status"] = "azimuth_excluded"
+        audit.loc[excluded, "selection_reason"] = (
+            f"sector cap={max_per_sector} after channel_priority then distance ranking"
+        )
+        candidate = audit.loc[selected_indices].copy()
+        if len(candidate) < int(azimuth_config["minimum_stations"]):
+            raise ValueError(
+                f"Azimuth selection retained {len(candidate)} stations, below "
+                f"minimum_stations={int(azimuth_config['minimum_stations'])}."
+            )
+
+    selected = table.loc[candidate.index].copy().sort_values("distance_km", ignore_index=True)
+    audit = audit.sort_values(["azimuth_sector", "channel_priority_rank", "distance_km", "network", "station"], ignore_index=True)
+    return selected, audit
+
+
+def _validate_selected_azimuth_geometry(
+    station_df: pd.DataFrame,
+    azimuth_config: Mapping[str, Any],
+) -> None:
+    """Validate the actually loaded subset after waveform-level station failures."""
+    if not bool(azimuth_config["azimuth_selection"]):
+        return
+    if len(station_df) < int(azimuth_config["minimum_stations"]):
+        raise ValueError(
+            f"Only {len(station_df)} stations remain after waveform loading, below "
+            f"azimuth_control minimum_stations={int(azimuth_config['minimum_stations'])}."
+        )
+    azimuth = pd.to_numeric(station_df["azimuth_deg"], errors="coerce").to_numpy(dtype=float)
+    if not np.isfinite(azimuth).all():
+        raise ValueError("Loaded station azimuths must be finite when azimuth_control is enabled.")
+    sectors = np.floor((azimuth % 360.0) / 45.0).astype(int)
+    occupied = int(np.unique(sectors).size)
+    if occupied < int(azimuth_config["azimuth_min_sectors"]):
+        raise ValueError(
+            f"Waveform loading reduced azimuthal coverage to {occupied} occupied sectors, below "
+            f"azimuth_min_sectors={int(azimuth_config['azimuth_min_sectors'])}."
+        )
+
+
 def _parse_channel_codes(value: Sequence[str] | str | None) -> tuple[str, ...]:
     """Normalize channel codes from a sequence or comma-separated string.
 
@@ -370,37 +841,92 @@ def _row_component_selection(row: Mapping[str, Any]) -> tuple[str, tuple[str, st
     return _component_selection_from_codes(_parse_channel_codes(row.get("channels")))
 
 
-def _inventory_channel_families(inventory, channel_priority: Sequence[str], *, ground_level: bool) -> pd.DataFrame:
+def _inventory_channel_families(
+    inventory,
+    channel_priority: ChannelPriority | Mapping[str, Any],
+    *,
+    ground_level: bool,
+    channels: Sequence[str] = ("HH?", "BH?", "LH?"),
+    magnitude: float | None = None,
+    event_lat: float | None = None,
+    event_lon: float | None = None,
+) -> pd.DataFrame:
     """Select one complete three-component family per station from StationXML.
 
-    Candidates are grouped by network, station, location and two-character
-    channel prefix. Prefix priority is user-controlled; within a prefix the
-    orientation preference is ZNE, Z12, then 123. Selected components must have
-    one common positive sample rate, sensor depth, sensor location and elevation.
-    When ``ground_level=True``, StationXML ``Channel.depth`` must be zero.
+    ``channel_priority`` may be the historical ordered family sequence or the
+    normalized rule mapping returned by :func:`_normalize_channel_priority`.
+    Rule-based priorities are evaluated separately for each station using the
+    event magnitude and epicentral distance. This must happen at metadata
+    selection time, before waveform download, because only the selected family
+    is subsequently requested and processed.
+
+    Within a channel family the orientation preference is ZNE, Z12, then 123.
+    Selected components must have one common positive sample rate, sensor depth,
+    sensor location and elevation. When ``ground_level=True``, StationXML
+    ``Channel.depth`` must be zero within the package tolerance.
     """
+    if isinstance(channel_priority, Mapping) and "mode" in channel_priority:
+        config = dict(channel_priority)
+    else:
+        config = _normalize_channel_priority(channel_priority, channels)
+
+    if config["mode"] == "rules" and (event_lat is None or event_lon is None):
+        raise ValueError(
+            "Rule-based channel_priority requires event_lat and event_lon during StationXML selection."
+        )
+
     rows: list[dict[str, Any]] = []
-    priority = {str(prefix): index for index, prefix in enumerate(channel_priority)}
+
+    if config["mode"] == "rules":
+        from obspy.geodetics.base import gps2dist_azimuth
 
     for network in inventory:
         for station in network:
+            if config["mode"] == "rules":
+                site_lat = float(station.latitude)
+                site_lon = float(station.longitude)
+                if not np.isfinite([site_lat, site_lon]).all():
+                    raise ValueError(
+                        f"Station {network.code}.{station.code} has non-finite site coordinates required by channel_priority rules."
+                    )
+                distance_m, _, _ = gps2dist_azimuth(
+                    float(event_lat), float(event_lon), site_lat, site_lon
+                )
+                rule_distance_km = float(distance_m) / 1000.0
+            else:
+                rule_distance_km = None
+
+            priority_order, rule_index = _resolve_channel_priority(
+                config, magnitude=magnitude, distance_km=rule_distance_km
+            )
+            priority_lookup = {value: rank for rank, value in enumerate(priority_order)}
+
             grouped: dict[tuple[str, str], list[Any]] = {}
             for channel in station.channels:
                 prefix = str(channel.code)[:2]
-                if prefix in priority:
+                # Metadata queries include every family needed by any rule, but
+                # family eligibility is station-specific. A family that appears
+                # only in a nonmatching rule must not leak into the default or a
+                # different rule merely because it was present in StationXML.
+                if prefix in priority_lookup:
                     grouped.setdefault((channel.location_code or "", prefix), []).append(channel)
 
             candidates = []
-            for (location, prefix), channels in grouped.items():
+            for (location, prefix), family_channels in grouped.items():
                 try:
-                    scheme, selected_codes = _component_selection_from_codes([channel.code for channel in channels])
+                    scheme, selected_codes = _component_selection_from_codes(
+                        [channel.code for channel in family_channels]
+                    )
                 except ValueError:
                     continue
 
                 selected_objects = []
                 for code in selected_codes:
-                    matches = [channel for channel in channels if channel.code == code]
-                    matches = [channel for channel in matches if np.isfinite(float(channel.sample_rate)) and float(channel.sample_rate) > 0]
+                    matches = [channel for channel in family_channels if channel.code == code]
+                    matches = [
+                        channel for channel in matches
+                        if np.isfinite(float(channel.sample_rate)) and float(channel.sample_rate) > 0
+                    ]
                     if not matches:
                         selected_objects = []
                         break
@@ -429,27 +955,51 @@ def _inventory_channel_families(inventory, channel_priority: Sequence[str], *, g
                 if not np.allclose(elevations, elevations[0], atol=_CHANNEL_ELEVATION_ATOL_M, rtol=0.0):
                     continue
 
+                station_lat = float(latitudes.mean())
+                station_lon = float(longitudes.mean())
+                priority_rank = priority_lookup.get(prefix, len(priority_lookup))
+
                 candidates.append({
-                    "network": network.code, "station": station.code, "location": location, "channel_prefix": prefix,
-                    "component_scheme": scheme, "selected_channels": ",".join(selected_codes),
-                    "channels": ",".join(sorted({channel.code for channel in channels})), "sample_rate": float(rates[0]),
-                    "channel_depth_m": float(depths.mean()), "station_lat": float(latitudes.mean()),
-                    "station_lon": float(longitudes.mean()), "station_elevation_m": float(elevations.mean()),
-                    "site_lat": float(station.latitude), "site_lon": float(station.longitude),
-                    "site_elevation_m": float(station.elevation), "priority": priority[prefix],
+                    "network": network.code,
+                    "station": station.code,
+                    "location": location,
+                    "channel_prefix": prefix,
+                    "component_scheme": scheme,
+                    "selected_channels": ",".join(selected_codes),
+                    "channels": ",".join(sorted({channel.code for channel in family_channels})),
+                    "sample_rate": float(rates[0]),
+                    "channel_depth_m": float(depths.mean()),
+                    "station_lat": station_lat,
+                    "station_lon": station_lon,
+                    "station_elevation_m": float(elevations.mean()),
+                    "site_lat": float(station.latitude),
+                    "site_lon": float(station.longitude),
+                    "site_elevation_m": float(station.elevation),
+                    "priority": int(priority_rank),
+                    "channel_priority_rule": rule_index,
                 })
 
             if candidates:
-                candidates.sort(key=lambda item: (item["priority"], _COMPONENT_SCHEMES.index(item["component_scheme"]), -item["sample_rate"], item["location"]))
+                candidates.sort(
+                    key=lambda item: (
+                        item["priority"],
+                        _COMPONENT_SCHEMES.index(item["component_scheme"]),
+                        -item["sample_rate"],
+                        item["location"],
+                    )
+                )
                 rows.append(candidates[0])
 
     columns = [
-        "network", "station", "location", "channel_prefix", "component_scheme", "selected_channels", "channels",
-        "sample_rate", "channel_depth_m", "station_lat", "station_lon", "station_elevation_m", "site_lat", "site_lon",
-        "site_elevation_m", "priority",
+        "network", "station", "location", "channel_prefix", "component_scheme",
+        "selected_channels", "channels", "sample_rate", "channel_depth_m",
+        "station_lat", "station_lon", "station_elevation_m", "site_lat", "site_lon",
+        "site_elevation_m", "priority", "channel_priority_rule",
     ]
-    return pd.DataFrame(rows, columns=columns).sort_values(["network", "station"], ignore_index=True) if rows else pd.DataFrame(columns=columns)
-
+    return (
+        pd.DataFrame(rows, columns=columns).sort_values(["network", "station"], ignore_index=True)
+        if rows else pd.DataFrame(columns=columns)
+    )
 
 def _compute_arrivals(taup, depth_km: float, event_lat: float, event_lon: float, station_lat: float, station_lon: float) -> tuple[float, float]:
     """Return first common regional P and S arrivals for plotting metadata."""
@@ -474,7 +1024,7 @@ def discover_stations(
     radius_scale_factor: float = 1.66,
     ground_level: bool = True,
     channels: Sequence[str] = ("HH?", "BH?", "LH?"),
-    channel_priority: Sequence[str] = ("HH", "BH", "LH"),
+    channel_priority: ChannelPriority = ("HH", "BH", "LH"),
     taup_model: str = "iasp91",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Discover and select regional three-component stations without waveforms.
@@ -482,7 +1032,11 @@ def discover_stations(
     ``client`` may be one ObsPy FDSN provider/client or an ordered sequence. Each
     provider is queried independently and the resulting station families are
     combined. One family is retained per network/station/location according to
-    ``channel_priority`` and the orientation preference ZNE -> Z12 -> 123.
+    ``channel_priority`` and the orientation preference ZNE -> Z12 -> 123. The
+    historical ordered prefix sequence remains supported. A mapping may instead
+    provide parallel ``mag_range``, ``dist_range`` and ``channels`` rules; these
+    are evaluated per station before waveform acquisition. Rule ranges are
+    half-open ``[min, max)`` and the first matching rule wins.
 
     ``max_radius_km`` is a user override. When it is ``None``, ``magnitude`` is
     required and the radius is computed with :func:`get_max_radius` using
@@ -516,9 +1070,10 @@ def discover_stations(
         raise ValueError("channels and channel_priority cannot be empty.")
 
     channel_patterns = tuple(str(value).strip() for value in channels)
-    priority_prefixes = tuple(str(value).strip() for value in channel_priority)
-    if any(len(value) != 2 for value in priority_prefixes):
-        raise ValueError("channel_priority entries must be two-character prefixes.")
+    if any(not value for value in channel_patterns):
+        raise ValueError("channels cannot contain empty patterns.")
+    priority_config = _normalize_channel_priority(channel_priority, channel_patterns)
+    channel_patterns = tuple(priority_config["query_patterns"])
 
     origin = UTCDateTime(origin_time)
     specs = _client_specs(client)
@@ -539,7 +1094,10 @@ def discover_stations(
                 raise TypeError("Each client must provide get_stations().")
             inventory = fdsn.get_stations(latitude=event_lat, longitude=event_lon, minradius=query_min_deg, maxradius=query_max_deg,
                                           starttime=origin, endtime=origin + 1.0, channel=channel_query, level="channel")
-            candidates = _inventory_channel_families(inventory, priority_prefixes, ground_level=ground_level)
+            candidates = _inventory_channel_families(
+                inventory, priority_config, ground_level=ground_level, channels=channel_patterns,
+                magnitude=magnitude, event_lat=event_lat, event_lon=event_lon,
+            )
         except Exception as exc:
             if len(specs) == 1:
                 raise
@@ -636,7 +1194,7 @@ def get_network_file(
     radius_scale_factor: float = 1.66,
     ground_level: bool = True,
     channels: Sequence[str] = ("HH?", "BH?", "LH?"),
-    channel_priority: Sequence[str] = ("HH", "BH", "LH"),
+    channel_priority: ChannelPriority = ("HH", "BH", "LH"),
     taup_model: str = "iasp91",
     output_dir: str | Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -748,11 +1306,13 @@ def get_mseed_stationxml(
     radius_scale_factor: float = 1.66,
     ground_level: bool = True,
     channels: Sequence[str] = ("HH?", "BH?", "LH?"),
-    channel_priority: Sequence[str] = ("HH", "BH", "LH"),
+    channel_priority: ChannelPriority = ("HH", "BH", "LH"),
     taup_model: str = "iasp91",
     min_depth_km: float = 5.0,
     min_depth_multiplier: float = 0.5,
     max_depth_multiplier: float = 3.0,
+    grid_min_depth_km: float | None = None,
+    grid_max_depth_km: float | None = None,
     time_unc_s: float = 2.0,
     rupture_velocity_m_s: float = 1000.0,
     velocity_slowest_m_s: float = 1000.0,
@@ -786,8 +1346,17 @@ def get_mseed_stationxml(
     an earlier service but whose waveform or response request failed. Stations
     unique to later providers are retained normally.
 
-    Supplying ``station_df`` restricts acquisition to those station/channel rows.
-    Successful files are validated for component completeness, common continuous
+    ``channel_priority`` accepts either the historical ordered prefix sequence or
+    the same magnitude/distance rule mapping as :func:`discover_stations`. Because
+    the selected three-component family determines the actual FDSN request, rules
+    are applied during StationXML discovery, before miniSEED is downloaded. Every
+    family referenced only by a rule is automatically added to the FDSN metadata
+    query as ``XX?``; no duplicate outer ``channels`` entry is required.
+
+    Supplying ``station_df`` restricts acquisition to those authoritative
+    station/channel rows; rule-based priority cannot substitute an alternate family
+    that is not present in the supplied table. Successful files are validated for
+    component completeness, common continuous
     coverage, response availability and sensor geometry, then stored under
     ``raw/waveforms`` and ``raw/stationxml``. ``plot=True`` writes the normalized,
     response-corrected unfiltered ZNE record section used for visual screening.
@@ -828,13 +1397,10 @@ def get_mseed_stationxml(
         raise ValueError("t_after must be None or a finite value > 0.")
 
     channel_patterns = tuple(str(value).strip() for value in channels)
-    priority_prefixes = tuple(str(value).strip() for value in channel_priority)
     if any(not value for value in channel_patterns):
         raise ValueError("channels cannot contain empty patterns.")
-    if any(len(value) != 2 for value in priority_prefixes):
-        raise ValueError("channel_priority entries must be two-character prefixes.")
-    if len(set(priority_prefixes)) != len(priority_prefixes):
-        raise ValueError("channel_priority cannot contain duplicate prefixes.")
+    priority_config = _normalize_channel_priority(channel_priority, channel_patterns)
+    channel_patterns = tuple(priority_config["query_patterns"])
 
     root = Path(output_dir).expanduser()
     waveform_dir, stationxml_dir, metadata_dir, figure_dir = root / "raw" / "waveforms", root / "raw" / "stationxml", root / "metadata", root / "figures"
@@ -875,7 +1441,10 @@ def get_mseed_stationxml(
                     raise TypeError("Each client must provide callable get_stations() and get_waveforms() methods.")
                 inventory = fdsn.get_stations(latitude=event_lat, longitude=event_lon, minradius=query_min_deg, maxradius=query_max_deg,
                                               starttime=origin, endtime=origin + 1.0, channel=channel_query, level="channel")
-                candidates = _inventory_channel_families(inventory, priority_prefixes, ground_level=ground_level)
+                candidates = _inventory_channel_families(
+                    inventory, priority_config, ground_level=ground_level, channels=channel_patterns,
+                    magnitude=magnitude, event_lat=event_lat, event_lon=event_lon,
+                )
             except Exception as exc:
                 if len(specs) == 1:
                     raise
@@ -921,7 +1490,8 @@ def get_mseed_stationxml(
             raise ValueError("magnitude is required when t_before or t_after is determined automatically.")
         waveform_window = get_waveform_window(
             event_depth_km, float(magnitude), max_distance_km=max(candidate_distances), min_depth_km=min_depth_km,
-            min_depth_multiplier=min_depth_multiplier, max_depth_multiplier=max_depth_multiplier, time_unc_s=time_unc_s,
+            min_depth_multiplier=min_depth_multiplier, max_depth_multiplier=max_depth_multiplier,
+            grid_min_depth_km=grid_min_depth_km, grid_max_depth_km=grid_max_depth_km, time_unc_s=time_unc_s,
             rupture_velocity_m_s=rupture_velocity_m_s, velocity_slowest_m_s=velocity_slowest_m_s, covariance=covariance,
             noise_factor=noise_factor, edge_margin_s=edge_margin_s, minimum_pre_event_s=minimum_pre_event_s,
         )
@@ -1063,6 +1633,8 @@ def get_waveform_window(
     min_depth_km: float = 5.0,
     min_depth_multiplier: float = 0.5,
     max_depth_multiplier: float = 3.0,
+    grid_min_depth_km: float | None = None,
+    grid_max_depth_km: float | None = None,
     time_unc_s: float = 2.0,
     rupture_velocity_m_s: float = 1000.0,
     velocity_slowest_m_s: float = 1000.0,
@@ -1120,7 +1692,8 @@ def get_waveform_window(
 
     grid_min_depth_km, grid_max_depth_km = _depth_bounds_km(
         event_depth_km, min_depth_km=min_depth_km, min_depth_multiplier=min_depth_multiplier,
-        max_depth_multiplier=max_depth_multiplier,
+        max_depth_multiplier=max_depth_multiplier, grid_min_depth_km=grid_min_depth_km,
+        grid_max_depth_km=grid_max_depth_km,
     )
     rupture_length_m = _bayesisola_rupture_length_m(magnitude)
     rupture_velocity_m_s = float(rupture_velocity_m_s)
@@ -2240,6 +2813,8 @@ def suggest_depth_limits(
     min_depth_km: float = 5.0,
     min_depth_multiplier: float = 0.5,
     max_depth_multiplier: float = 3.0,
+    grid_min_depth_km: float | None = None,
+    grid_max_depth_km: float | None = None,
     step_z_km: float,
     step_x_km: float,
     radius_km: float,
@@ -2268,7 +2843,8 @@ def suggest_depth_limits(
     step_z_km = float(step_z_km); step_x_km = float(step_x_km); radius_km = float(radius_km); max_points = int(max_points)
     grid_min_depth_km, grid_max_depth_km = _depth_bounds_km(
         catalog_depth_km, min_depth_km=min_depth_km, min_depth_multiplier=min_depth_multiplier,
-        max_depth_multiplier=max_depth_multiplier,
+        max_depth_multiplier=max_depth_multiplier, grid_min_depth_km=grid_min_depth_km,
+        grid_max_depth_km=grid_max_depth_km,
     )
     if step_z_km <= 0 or step_x_km <= 0:
         raise ValueError("step_z_km and step_x_km must be positive.")
@@ -2305,56 +2881,464 @@ def suggest_depth_limits(
     }
 
 
-def diagnose_grid_edge(grid, centroid: dict[str, Any] | None = None) -> dict[str, Any]:
-    """
-    Disambiguate a grid point's `edge=True` flag: depth-range edge vs.
-    horizontal-radius edge vs. horizontal-index edge. Pass the constructed
-    `BayesISOLA.grid` instance and, optionally, `solution.centroid` to
-    check that specific point; otherwise reports on every edge point found.
+def _grid_boundary_flags(grid, gp: Mapping[str, Any]) -> dict[str, bool]:
+    """Return dimension-specific boundary flags for one spatial grid point.
 
-    BayesISOLA stores depth- and horizontal-boundary conditions in one
-    ``edge`` flag. This helper separates those causes so an edge solution can
-    be interpreted correctly before deciding whether the depth range or the
-    horizontal search radius needs to be widened.
+    Native BayesISOLA stores depth and horizontal boundaries in one ``edge``
+    boolean.  A one-point horizontal grid (radius/steps equal to zero) is a
+    deliberate fixed-XY constraint, not a horizontal boundary failure.
     """
-    depths = sorted({gp["z"] for gp in grid.grid})
-    depth_lo, depth_hi = (depths[0], depths[-1]) if depths else (None, None)
-    n_steps = int(grid.radius / grid.step_x) if grid.step_x else 0
+    depths = sorted({float(point["z"]) for point in grid.grid if not point.get("err")})
+    depth_lo = depths[0] if depths else np.nan
+    depth_hi = depths[-1] if depths else np.nan
+    step_x = float(grid.step_x)
+    radius = float(grid.radius)
+    n_steps = int(radius / step_x) if step_x > 0 else 0
 
-    def _classify(gp: dict[str, Any]) -> list[str]:
-        reasons = []
-        if gp["z"] == depth_lo:
-            reasons.append(f"depth at grid floor ({depth_lo / 1e3:.3f} km)")
-        if gp["z"] == depth_hi:
-            reasons.append(f"depth at grid ceiling ({depth_hi / 1e3:.3f} km)")
-        i = round(gp["x"] / grid.step_x) if grid.step_x else 0
-        j = round(gp["y"] / grid.step_x) if grid.step_x else 0
-        if max(abs(i), abs(j)) == n_steps:
-            reasons.append(
-                f"horizontal index at max (i={i}, j={j}, n_steps={n_steps}); "
-                "driven by location_unc + rupture_length, not depth"
+    xy = {(float(point["x"]), float(point["y"])) for point in grid.grid if not point.get("err")}
+    horizontal_fixed = len(xy) <= 1 or radius <= 0.0 or n_steps <= 0
+
+    z = float(gp["z"])
+    x = float(gp["x"])
+    y = float(gp["y"])
+    depth_floor = bool(depths) and np.isclose(z, depth_lo)
+    depth_ceiling = bool(depths) and np.isclose(z, depth_hi)
+
+    horizontal = False
+    north = south = east = west = False
+    if not horizontal_fixed and step_x > 0:
+        i = int(round(x / step_x))
+        j = int(round(y / step_x))
+        index_edge = max(abs(i), abs(j)) == n_steps
+        if bool(getattr(grid, "circle_shape", True)):
+            radial_edge = (
+                math.sqrt((abs(x) + step_x) ** 2 + y ** 2) > radius
+                or math.sqrt((abs(y) + step_x) ** 2 + x ** 2) > radius
             )
-        return reasons or ["horizontal distance exceeds radius by >1 step"]
+        else:
+            radial_edge = False
+        horizontal = bool(index_edge or radial_edge)
+        if horizontal:
+            tol = 0.25 * step_x
+            north = x > tol
+            south = x < -tol
+            east = y > tol
+            west = y < -tol
+            # A boundary point can lie on a curved sector without either
+            # coordinate being near its absolute maximum.  Preserve the
+            # dominant sign so directional diagnostics remain informative.
+            if not (north or south or east or west):
+                if abs(x) >= abs(y):
+                    north = x >= 0
+                    south = x < 0
+                else:
+                    east = y >= 0
+                    west = y < 0
+
+    return {
+        "horizontal_search_fixed": horizontal_fixed,
+        "on_horizontal_boundary": horizontal,
+        "on_north_boundary": north,
+        "on_south_boundary": south,
+        "on_east_boundary": east,
+        "on_west_boundary": west,
+        "on_depth_floor": depth_floor,
+        "on_depth_ceiling": depth_ceiling,
+        "on_active_spatial_boundary": bool(horizontal or depth_floor or depth_ceiling),
+    }
+
+
+def diagnose_grid_edge(grid, centroid: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Disaggregate BayesISOLA spatial-grid boundary diagnostics.
+
+    The 0.1.1 native ``gp['edge']`` flag combines horizontal and depth edges and
+    also labels a deliberately fixed one-point XY grid as an edge.  This helper
+    treats fixed XY as a constraint rather than a failed search and reports the
+    active dimensions separately.
+    """
+    depths = sorted({float(gp["z"]) for gp in grid.grid if not gp.get("err")})
+    depth_lo, depth_hi = (depths[0], depths[-1]) if depths else (None, None)
+    step_x = float(grid.step_x)
+    radius = float(grid.radius)
+    n_steps = int(radius / step_x) if step_x > 0 else 0
+    xy = {(float(gp["x"]), float(gp["y"])) for gp in grid.grid if not gp.get("err")}
+    horizontal_fixed = len(xy) <= 1 or radius <= 0.0 or n_steps <= 0
 
     report: dict[str, Any] = {
-        "realized_radius_km": grid.radius / 1e3,
-        "realized_step_x_km": grid.step_x / 1e3,
-        "realized_step_z_km": grid.step_z / 1e3,
+        "realized_radius_km": radius / 1e3,
+        "realized_step_x_km": step_x / 1e3,
+        "realized_step_z_km": float(grid.step_z) / 1e3,
         "realized_depth_range_km": (
             (depth_lo / 1e3, depth_hi / 1e3) if depths else None
         ),
         "n_depth_levels_realized": len(depths),
         "n_steps_horizontal": n_steps,
+        "horizontal_search_fixed": horizontal_fixed,
     }
+
     if centroid is not None:
-        report["centroid_edge_reasons"] = (
-            _classify(centroid) if centroid.get("edge") else []
-        )
+        flags = _grid_boundary_flags(grid, centroid)
+        report.update({f"centroid_{key}": value for key, value in flags.items()})
+        reasons: list[str] = []
+        if flags["horizontal_search_fixed"]:
+            reasons.append("horizontal search fixed (single XY point; not treated as a boundary)")
+        elif flags["on_horizontal_boundary"]:
+            directions = [
+                name for name, key in (
+                    ("north", "on_north_boundary"), ("south", "on_south_boundary"),
+                    ("east", "on_east_boundary"), ("west", "on_west_boundary"),
+                ) if flags[key]
+            ]
+            suffix = f" ({'/'.join(directions)})" if directions else ""
+            reasons.append(f"horizontal search boundary{suffix}")
+        if flags["on_depth_floor"]:
+            reasons.append(f"depth at grid floor ({depth_lo / 1e3:.3f} km)")
+        if flags["on_depth_ceiling"]:
+            reasons.append(f"depth at grid ceiling ({depth_hi / 1e3:.3f} km)")
+        report["centroid_edge_reasons"] = reasons
     else:
-        edge_points = [gp for gp in grid.grid if gp.get("edge") and not gp.get("err")]
-        report["n_edge_points"] = len(edge_points)
+        report["n_edge_points"] = sum(
+            _grid_boundary_flags(grid, gp)["on_active_spatial_boundary"]
+            for gp in grid.grid if not gp.get("err")
+        )
     return report
- 
+
+
+def _grid_point_estimate(radius_km: float, step_x_km: float, depth_min_km: float,
+                         depth_max_km: float, step_z_km: float) -> float:
+    """Continuous BayesISOLA-style estimate used only for adaptive cost control."""
+    radius_km = float(radius_km)
+    step_x_km = float(step_x_km)
+    step_z_km = float(step_z_km)
+    depth_span_km = max(0.0, float(depth_max_km) - float(depth_min_km))
+    if step_x_km <= 0 or step_z_km <= 0:
+        raise ValueError("Grid spacings must be positive.")
+    if radius_km <= 0:
+        return max(1.0, depth_span_km / step_z_km)
+    return math.pi * (radius_km / step_x_km) ** 2 * depth_span_km / step_z_km
+
+
+_ADAPTIVE_GRID_SEARCH_DEFAULTS: dict[str, Any] = {
+    "adaptive_grid": True,
+    "adaptive_expand_xy_steps": 2,
+    "adaptive_expand_z_steps": 2,
+    "adaptive_max_expansions": 1,
+    "adaptive_max_refinements": 1,
+    "adaptive_refine_factor": 0.5,
+    "adaptive_min_step_fraction": 0.25,
+    "adaptive_depth_window_parent_steps": 3,
+    "adaptive_max_radius_factor": 2.0,
+    "adaptive_max_depth_span_factor": 1.5,
+    "adaptive_max_grid_points": 20000,
+    "adaptive_max_total_reruns": 2,
+    "adaptive_expand_on_posterior_boundary": True,
+    "adaptive_boundary_probability_threshold": 0.05,
+}
+
+
+def _normalize_adaptive_grid_search(
+    adaptive_grid_search: bool | Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a validated adaptive-search configuration.
+
+    ``None``/``False`` preserves the non-adaptive workflow, ``True`` enables the
+    validated defaults, and a mapping enables adaptive search while overriding
+    only named settings. ``adaptive_grid=False`` inside a mapping remains a
+    supported explicit disable switch.
+    """
+    if adaptive_grid_search is None or adaptive_grid_search is False:
+        config = dict(_ADAPTIVE_GRID_SEARCH_DEFAULTS)
+        config["adaptive_grid"] = False
+        return config
+    if adaptive_grid_search is True:
+        adaptive_grid_search = {}
+    if not isinstance(adaptive_grid_search, Mapping):
+        raise TypeError("adaptive_grid_search must be None, a boolean, or a mapping.")
+
+    unknown = sorted(set(adaptive_grid_search) - set(_ADAPTIVE_GRID_SEARCH_DEFAULTS))
+    if unknown:
+        allowed = ", ".join(_ADAPTIVE_GRID_SEARCH_DEFAULTS)
+        raise ValueError(
+            f"Unknown adaptive_grid_search option(s): {', '.join(map(str, unknown))}. "
+            f"Allowed keys are: {allowed}."
+        )
+
+    config = dict(_ADAPTIVE_GRID_SEARCH_DEFAULTS)
+    config.update(dict(adaptive_grid_search))
+    config["adaptive_grid"] = bool(config["adaptive_grid"])
+    config["adaptive_expand_on_posterior_boundary"] = bool(
+        config["adaptive_expand_on_posterior_boundary"]
+    )
+
+    for key in ("adaptive_expand_xy_steps", "adaptive_expand_z_steps"):
+        value = int(config[key])
+        if value < 1:
+            raise ValueError(f"{key} must be >= 1.")
+        config[key] = value
+
+    config["adaptive_max_expansions"] = int(config["adaptive_max_expansions"])
+    if config["adaptive_max_expansions"] < 0:
+        raise ValueError("adaptive_max_expansions cannot be negative.")
+    config["adaptive_max_refinements"] = int(config["adaptive_max_refinements"])
+    if not 0 <= config["adaptive_max_refinements"] <= 2:
+        raise ValueError("adaptive_max_refinements must be 0, 1 or 2.")
+
+    config["adaptive_refine_factor"] = float(config["adaptive_refine_factor"])
+    if not 0.0 <= config["adaptive_refine_factor"] < 1.0:
+        raise ValueError("adaptive_refine_factor must lie within [0, 1); 0 disables refinement.")
+    config["adaptive_min_step_fraction"] = float(config["adaptive_min_step_fraction"])
+    if not 0.25 <= config["adaptive_min_step_fraction"] <= 1.0:
+        raise ValueError("adaptive_min_step_fraction must lie within [0.25, 1].")
+
+    depth_steps = config["adaptive_depth_window_parent_steps"]
+    if depth_steps is not None:
+        depth_steps = int(depth_steps)
+        if depth_steps < 1:
+            raise ValueError("adaptive_depth_window_parent_steps must be >= 1 or None.")
+    config["adaptive_depth_window_parent_steps"] = depth_steps
+
+    for key in ("adaptive_max_radius_factor", "adaptive_max_depth_span_factor"):
+        value = float(config[key])
+        if value < 1.0:
+            raise ValueError(f"{key} must be >= 1.")
+        config[key] = value
+
+    max_points = config["adaptive_max_grid_points"]
+    if max_points is not None:
+        max_points = int(max_points)
+        if max_points <= 0:
+            raise ValueError("adaptive_max_grid_points must be positive or None.")
+    config["adaptive_max_grid_points"] = max_points
+
+    config["adaptive_max_total_reruns"] = int(config["adaptive_max_total_reruns"])
+    if config["adaptive_max_total_reruns"] < 0:
+        raise ValueError("adaptive_max_total_reruns cannot be negative.")
+    config["adaptive_boundary_probability_threshold"] = float(
+        config["adaptive_boundary_probability_threshold"]
+    )
+    if not 0.0 <= config["adaptive_boundary_probability_threshold"] <= 1.0:
+        raise ValueError("adaptive_boundary_probability_threshold must lie within [0, 1].")
+    return config
+
+
+def compute_grid_expansion(
+    grid,
+    centroid: Mapping[str, Any],
+    *,
+    initial_radius_km: float,
+    initial_depth_min_km: float,
+    initial_depth_max_km: float,
+    expand_xy_steps: int = 2,
+    expand_z_steps: int = 2,
+    max_radius_factor: float = 2.0,
+    max_depth_span_factor: float = 1.5,
+    min_depth_km: float = 0.0,
+    grid_point_budget: int | None = None,
+    posterior_diagnostics: Mapping[str, Any] | None = None,
+    boundary_probability_threshold: float = 0.05,
+) -> dict[str, Any]:
+    """Propose one bounded, catalogue-centred grid expansion.
+
+    XY expansion is always symmetric about the catalogue epicentre; the grid is
+    never re-centred on the current centroid.  Depth expands only on the active
+    floor/ceiling side.  This function only proposes a grid -- it performs no
+    Green-function calculation or inversion.
+    """
+    if int(expand_xy_steps) < 1 or int(expand_z_steps) < 1:
+        raise ValueError("expand_xy_steps and expand_z_steps must be >= 1.")
+    if float(max_radius_factor) < 1.0 or float(max_depth_span_factor) < 1.0:
+        raise ValueError("Adaptive extent factors must be >= 1.")
+
+    flags = _grid_boundary_flags(grid, centroid)
+    threshold = float(boundary_probability_threshold)
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("boundary_probability_threshold must lie within [0, 1].")
+    posterior_diagnostics = dict(posterior_diagnostics or {})
+
+    horizontal_probability = posterior_diagnostics.get(
+        "posterior_horizontal_boundary_probability", np.nan
+    )
+    depth_floor_probability = posterior_diagnostics.get(
+        "posterior_depth_floor_probability", np.nan
+    )
+    depth_ceiling_probability = posterior_diagnostics.get(
+        "posterior_depth_ceiling_probability", np.nan
+    )
+    horizontal_active = bool(flags["on_horizontal_boundary"]) or (
+        np.isfinite(horizontal_probability) and float(horizontal_probability) >= threshold
+    )
+    depth_floor_active = bool(flags["on_depth_floor"]) or (
+        np.isfinite(depth_floor_probability) and float(depth_floor_probability) >= threshold
+    )
+    depth_ceiling_active = bool(flags["on_depth_ceiling"]) or (
+        np.isfinite(depth_ceiling_probability) and float(depth_ceiling_probability) >= threshold
+    )
+
+    radius = float(grid.radius) / 1000.0
+    step_x = float(grid.step_x) / 1000.0
+    step_z = float(grid.step_z) / 1000.0
+    depths = sorted({float(gp["z"]) / 1000.0 for gp in grid.grid if not gp.get("err")})
+    if not depths:
+        raise RuntimeError("Cannot expand an empty grid.")
+    depth_min = depths[0]
+    depth_max = depths[-1]
+
+    new_radius = radius
+    new_depth_min = depth_min
+    new_depth_max = depth_max
+    actions: list[str] = []
+
+    if horizontal_active and not flags["horizontal_search_fixed"]:
+        cap = float(initial_radius_km) * float(max_radius_factor)
+        new_radius = min(radius + int(expand_xy_steps) * step_x, cap)
+        if new_radius > radius + 1e-12:
+            actions.append("expand_xy")
+
+    initial_span = float(initial_depth_max_km) - float(initial_depth_min_km)
+    extra_total = max(0.0, (float(max_depth_span_factor) - 1.0) * initial_span)
+    both_depth_edges = depth_floor_active and depth_ceiling_active
+    side_allowance = extra_total / 2.0 if both_depth_edges else extra_total
+
+    if depth_floor_active:
+        lower_cap = max(float(min_depth_km), float(initial_depth_min_km) - side_allowance)
+        candidate = max(lower_cap, depth_min - int(expand_z_steps) * step_z)
+        if candidate < depth_min - 1e-12:
+            new_depth_min = candidate
+            actions.append("expand_z_floor")
+
+    if depth_ceiling_active:
+        upper_cap = float(initial_depth_max_km) + side_allowance
+        candidate = min(upper_cap, depth_max + int(expand_z_steps) * step_z)
+        if candidate > depth_max + 1e-12:
+            new_depth_max = candidate
+            actions.append("expand_z_ceiling")
+
+    estimate = _grid_point_estimate(new_radius, step_x, new_depth_min, new_depth_max, step_z)
+    budget_ok = grid_point_budget is None or estimate <= int(grid_point_budget)
+    apply = bool(actions) and budget_ok
+    reason = "apply" if apply else ("grid_point_budget_exceeded" if actions and not budget_ok else "no_expandable_active_boundary")
+    max_points = max(1, int(math.ceil(estimate * 1.05)))
+
+    return {
+        "apply": apply,
+        "reason": reason,
+        "actions": actions,
+        "grid_radius_km": new_radius,
+        "grid_min_depth_km": new_depth_min,
+        "grid_max_depth_km": new_depth_max,
+        "step_x_km": step_x,
+        "step_z_km": step_z,
+        "estimated_grid_points": estimate,
+        "max_grid_points_required": max_points,
+        "boundary_flags": flags,
+        "posterior_boundary_probability_threshold": threshold,
+        "posterior_horizontal_boundary_probability": horizontal_probability,
+        "posterior_depth_floor_probability": depth_floor_probability,
+        "posterior_depth_ceiling_probability": depth_ceiling_probability,
+    }
+
+
+def compute_grid_refinement(
+    grid,
+    centroid: Mapping[str, Any],
+    *,
+    initial_step_x_km: float,
+    initial_step_z_km: float,
+    refinement_level: int,
+    max_refinement_levels: int = 2,
+    refine_factor: float = 0.5,
+    min_step_fraction: float = 0.25,
+    depth_window_parent_steps: int | None = 3,
+    grid_point_budget: int | None = None,
+    posterior_diagnostics: Mapping[str, Any] | None = None,
+    boundary_probability_threshold: float = 0.05,
+) -> dict[str, Any]:
+    """Propose one bounded x/y/z refinement on a symmetric XY domain.
+
+    The horizontal search remains centred on the catalogue epicentre.  A fixed
+    one-point XY search stays fixed.  Depth may be narrowed around an internal
+    coarse-grid optimum to control cost; set ``depth_window_parent_steps=None``
+    to retain the full depth range.  Automatic refinement is hard-limited to two
+    levels (quarter of the initial spacing at the default factor 0.5).
+    """
+    refinement_level = int(refinement_level)
+    max_refinement_levels = int(max_refinement_levels)
+    if not 0 <= max_refinement_levels <= 2:
+        raise ValueError("max_refinement_levels must be 0, 1 or 2 for the bounded adaptive search.")
+    if refinement_level >= max_refinement_levels:
+        return {"apply": False, "reason": "maximum_refinement_level_reached"}
+    refine_factor = float(refine_factor)
+    if np.isclose(refine_factor, 0.0):
+        return {"apply": False, "reason": "refinement_disabled"}
+    if not 0.0 < refine_factor < 1.0:
+        raise ValueError("refine_factor must lie within [0, 1); 0 disables refinement.")
+    if not 0.25 <= float(min_step_fraction) <= 1:
+        raise ValueError("min_step_fraction must lie within [0.25, 1] for bounded 0.2 refinement.")
+
+    flags = _grid_boundary_flags(grid, centroid)
+    threshold = float(boundary_probability_threshold)
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("boundary_probability_threshold must lie within [0, 1].")
+    posterior_diagnostics = dict(posterior_diagnostics or {})
+    posterior_boundary_probability = posterior_diagnostics.get(
+        "posterior_active_spatial_boundary_probability", np.nan
+    )
+    posterior_boundary_active = (
+        np.isfinite(posterior_boundary_probability)
+        and float(posterior_boundary_probability) >= threshold
+    )
+    if flags["on_active_spatial_boundary"] or posterior_boundary_active:
+        return {
+            "apply": False,
+            "reason": "active_boundary_requires_expansion",
+            "boundary_flags": flags,
+            "posterior_active_spatial_boundary_probability": posterior_boundary_probability,
+        }
+
+    radius = float(grid.radius) / 1000.0
+    current_step_x = float(grid.step_x) / 1000.0
+    current_step_z = float(grid.step_z) / 1000.0
+    horizontal_fixed = flags["horizontal_search_fixed"]
+
+    min_step_x = float(initial_step_x_km) * float(min_step_fraction)
+    min_step_z = float(initial_step_z_km) * float(min_step_fraction)
+    new_step_x = current_step_x if horizontal_fixed else max(current_step_x * refine_factor, min_step_x)
+    new_step_z = max(current_step_z * refine_factor, min_step_z)
+
+    if np.isclose(new_step_x, current_step_x) and np.isclose(new_step_z, current_step_z):
+        return {"apply": False, "reason": "minimum_spacing_reached", "boundary_flags": flags}
+
+    depths = sorted({float(gp["z"]) / 1000.0 for gp in grid.grid if not gp.get("err")})
+    depth_min = depths[0]
+    depth_max = depths[-1]
+    if depth_window_parent_steps is not None:
+        steps = int(depth_window_parent_steps)
+        if steps < 1:
+            raise ValueError("depth_window_parent_steps must be >= 1 or None.")
+        center_depth = float(centroid["z"]) / 1000.0
+        depth_min = max(depth_min, center_depth - steps * current_step_z)
+        depth_max = min(depth_max, center_depth + steps * current_step_z)
+
+    estimate = _grid_point_estimate(radius, new_step_x, depth_min, depth_max, new_step_z)
+    budget_ok = grid_point_budget is None or estimate <= int(grid_point_budget)
+    apply = budget_ok
+    reason = "apply" if apply else "grid_point_budget_exceeded"
+    max_points = max(1, int(math.ceil(estimate * 1.05)))
+
+    return {
+        "apply": apply,
+        "reason": reason,
+        "grid_radius_km": radius,
+        "grid_min_depth_km": depth_min,
+        "grid_max_depth_km": depth_max,
+        "step_x_km": new_step_x,
+        "step_z_km": new_step_z,
+        "estimated_grid_points": estimate,
+        "max_grid_points_required": max_points,
+        "boundary_flags": flags,
+        "refinement_level": refinement_level + 1,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Structured output extraction
@@ -2405,15 +3389,14 @@ def extract_station_fit_df(solution) -> pd.DataFrame:
 def extract_centroid_location(solution) -> dict[str, Any]:
     """Return catalogue hypocentre and preferred BayesISOLA centroid location.
 
-    The returned mapping is designed to form one row of a results table. Event
-    and centroid depths are in kilometres; north/east centroid offsets are in
-    metres; ``centroid_time_shift_s`` is relative to the catalogue origin time.
-    ``variance_reduction`` is BayesISOLA's native fractional VR (1.0 = 100%),
-    while ``condition_number`` is the native inversion condition number.
+    ``on_grid_edge`` is the corrected *active* spatial-boundary state.  A
+    deliberately fixed one-point XY grid is reported through
+    ``horizontal_search_fixed`` rather than being mislabelled as an edge.
     """
     event = solution.event
     c = solution.centroid
     centroid_time = event["t"] + c["shift"]
+    flags = _grid_boundary_flags(solution.g, c)
     return {
         "origin_time": event["t"].datetime,
         "origin_lat": event["lat"],
@@ -2426,11 +3409,14 @@ def extract_centroid_location(solution) -> dict[str, Any]:
         "centroid_depth_km": c["z"] / 1e3,
         "offset_north_m": c["x"],
         "offset_east_m": c["y"],
-        "on_grid_edge": bool(c["edge"]),
+        "on_grid_edge": bool(flags["on_active_spatial_boundary"]),
+        "horizontal_search_fixed": bool(flags["horizontal_search_fixed"]),
+        "on_horizontal_boundary": bool(flags["on_horizontal_boundary"]),
+        "on_depth_floor": bool(flags["on_depth_floor"]),
+        "on_depth_ceiling": bool(flags["on_depth_ceiling"]),
         "variance_reduction": c["VR"],
         "condition_number": c["CN"],
     }
-
 
 def extract_solution_summary(solution) -> dict[str, Any]:
     """Return the preferred moment-tensor solution as a flat mapping.
@@ -2467,160 +3453,1111 @@ def extract_solution_summary(solution) -> dict[str, Any]:
     }
 
 
-def extract_uncertainty_df(solution, n: int = 400) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Return BayesISOLA mechanism realizations with their space-time support.
+def _resolve_uncertainty_variance_scale(
+    solution,
+    uncertainty_scale: str | float = "fixed",
+    *,
+    minimum_scale: float = 1.0,
+) -> tuple[float, dict[str, Any]]:
+    """Resolve the scalar variance multiplier used for posterior/MT sampling.
 
-    Moment-tensor realizations are generated by BayesISOLA's native
-    ``plot_uncertainty(..., just_return_histogram_data=True)`` routine. This
-    helper does not replace that sampler. It replays only BayesISOLA's deterministic
-    allocation loop -- ``round(GP['c'] / solution.sum_c * n)`` -- to attach the
-    same grid point and source-time shift to each returned mechanism realization,
-    in the same iteration order used by the native routine.
-
-    The space-time columns are therefore *discrete posterior support labels*.
-    Within one occupied grid-point/time-shift cell, depth, latitude/longitude,
-    horizontal offsets and time are repeated while BayesISOLA samples moment
-    tensors from that grid point's ``GtGinv`` covariance. Zero spread in a
-    location/time column consequently means the rounded realizations occupied
-    only one sampled value at the chosen grid resolution; it is not evidence of
-    zero sub-grid uncertainty.
-
-    ``n`` is a target realization count, not an exact row count. BayesISOLA
-    rounds each space-time cell independently, so ``n_allocated``/``n_sampled``
-    can differ slightly from ``n_requested``. The returned diagnostics distinguish
-    unique spatial grid points, unique time shifts and occupied space-time cells.
-
-    Existing mechanism column names from earlier helper versions are retained for
-    compatibility. Added columns include grid/shift identifiers, absolute and
-    relative centroid time, centroid coordinates/depth/offsets, edge status,
-    normalized space-time-cell weight and the rounded number of draws assigned to the
-    originating cell.
+    ``fixed`` reproduces the 0.1.1 likelihood/covariance exactly. ``residual``
+    estimates a common discrepancy variance as chi-square / degrees-of-freedom
+    at the preferred cell and, by default, does not allow the measured-noise
+    covariance to be deflated below its original scale.
     """
-    import BayesISOLA
+    n_parameters = 5 if solution.deviatoric else 6
+    n_data = int(solution.d.components * solution.d.npts_slice)
+    dof = n_data - n_parameters
+    if dof <= 0:
+        raise ValueError("Not enough waveform values to estimate an uncertainty scale.")
+    mode_misfit = float(solution.centroid["misfit"])
+    reduced_chi2 = mode_misfit / dof
 
-    n = int(n)
-    if n <= 0:
-        raise ValueError("n must be a positive integer.")
-    sum_c = float(solution.sum_c)
-    if not np.isfinite(sum_c) or sum_c <= 0.0:
-        raise ValueError("solution.sum_c must be positive and finite for uncertainty sampling.")
+    if isinstance(uncertainty_scale, str):
+        mode = uncertainty_scale.lower().strip()
+        if mode in {"fixed", "noise", "native"}:
+            scale = 1.0
+            mode = "fixed"
+        elif mode in {"residual", "scaled", "residual_scaled"}:
+            scale = max(float(minimum_scale), reduced_chi2)
+            mode = "residual"
+        else:
+            raise ValueError("uncertainty_scale must be 'fixed', 'residual', or a positive number.")
+    else:
+        scale = float(uncertainty_scale)
+        mode = "explicit"
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError("A numerical uncertainty_scale must be positive and finite.")
 
-    shim = BayesISOLA.plot(solution, **PLOT_PRESETS["none"])
+    diagnostics = {
+        "uncertainty_scale_mode": mode,
+        "variance_scale": scale,
+        "sd_scale": math.sqrt(scale),
+        "n_waveform_values": n_data,
+        "n_mt_parameters": n_parameters,
+        "degrees_of_freedom": dof,
+        "preferred_misfit": mode_misfit,
+        "reduced_chi_square": reduced_chi2,
+    }
+    return scale, diagnostics
 
-    allocation_rows: list[dict[str, Any]] = []
-    used_grid_points: set[int] = set()
-    used_shift_indices: set[int] = set()
-    used_cells: set[tuple[int, int]] = set()
 
-    for grid_index, gp in enumerate(solution.grid):
-        if gp["err"]:
-            continue
-        for shift_index, shift_entry in gp["shifts"].items():
-            n_gp = int(round(float(shift_entry["c"]) / sum_c * n))
-            if n_gp <= 0:
-                continue
+def build_posterior_cells(solution, *, variance_scale: float = 1.0) -> pd.DataFrame:
+    """Expose the complete discrete BayesISOLA space-time posterior.
 
-            shift_index_int = int(shift_index)
-            shift_s = float(shim.data.shifts[shift_index])
-            centroid_time = solution.event["t"] + shift_s
-            weight = float(shift_entry["c"]) / sum_c
-            label = {
-                "grid_point_index": int(grid_index),
-                "grid_point_id": gp.get("id", str(grid_index).zfill(4)),
-                "shift_index": shift_index_int,
+    Cell likelihoods are reconstructed from the shift-specific misfit and
+    ``log_det_Ca`` in log space.  ``variance_scale=1`` reproduces 0.1.1 exactly;
+    a common scalar covariance inflation divides relative misfit differences by
+    that variance factor.  The determinant's common scale factor cancels between
+    cells, so the stored shift-specific log determinant remains sufficient.
+    """
+    from scipy.special import logsumexp
+
+    variance_scale = float(variance_scale)
+    if not np.isfinite(variance_scale) or variance_scale <= 0:
+        raise ValueError("variance_scale must be positive and finite.")
+
+    valid_grid = [(gi, gp) for gi, gp in enumerate(solution.grid) if not gp["err"]]
+    n_cells = sum(len(gp["shifts"]) for _, gp in valid_grid)
+    if n_cells == 0:
+        raise RuntimeError("No valid BayesISOLA space-time cells are available.")
+
+    rows: list[dict[str, Any]] = []
+    for gi, gp in valid_grid:
+        spatial_flags = _grid_boundary_flags(solution.g, gp)
+        for si, GP in gp["shifts"].items():
+            si = int(si)
+            shift_s = float(solution.d.shifts[si])
+            rows.append({
+                "cell_index": len(rows),
+                "grid_index": int(gi),
+                "grid_point_id": str(gp.get("id", gi)),
+                "x_id": str(gp.get("x_id", "")),
+                "y_id": str(gp.get("y_id", "")),
+                "z_id": str(gp.get("z_id", "")),
+                "shift_index": si,
                 "centroid_time_shift_s": shift_s,
-                "centroid_time": centroid_time.datetime if hasattr(centroid_time, "datetime") else centroid_time,
                 "centroid_lat": float(gp.get("lat", np.nan)),
                 "centroid_lon": float(gp.get("lon", np.nan)),
                 "centroid_depth_km": float(gp["z"]) / 1e3,
                 "offset_north_m": float(gp["x"]),
                 "offset_east_m": float(gp["y"]),
-                "on_grid_edge": bool(gp.get("edge", False)),
-                "space_time_cell_weight": weight,
-                "space_time_cell_n_draws": n_gp,
+                "horizontal_search_fixed": bool(spatial_flags["horizontal_search_fixed"]),
+                "on_horizontal_boundary": bool(spatial_flags["on_horizontal_boundary"]),
+                "on_depth_floor": bool(spatial_flags["on_depth_floor"]),
+                "on_depth_ceiling": bool(spatial_flags["on_depth_ceiling"]),
+                "misfit": float(GP["misfit"]),
+                "variance_reduction": float(GP["VR"]),
+                "condition_number": float(GP["CN"]),
+                "log_det_Ca": float(GP["log_det_Ca"]),
+                "native_weight": float(GP["c"]),
+            })
+
+    df = pd.DataFrame(rows)
+    time_min = float(df["centroid_time_shift_s"].min())
+    time_max = float(df["centroid_time_shift_s"].max())
+    time_fixed = np.isclose(time_min, time_max)
+    df["time_search_fixed"] = bool(time_fixed)
+    df["on_time_floor"] = False if time_fixed else np.isclose(df["centroid_time_shift_s"], time_min)
+    df["on_time_ceiling"] = False if time_fixed else np.isclose(df["centroid_time_shift_s"], time_max)
+    df["on_active_boundary"] = (
+        df["on_horizontal_boundary"] | df["on_depth_floor"] | df["on_depth_ceiling"]
+        | df["on_time_floor"] | df["on_time_ceiling"]
+    )
+
+    misfit = df["misfit"].to_numpy(dtype=float)
+    log_det = df["log_det_Ca"].to_numpy(dtype=float)
+    finite = np.isfinite(misfit) & np.isfinite(log_det)
+    if not finite.any():
+        raise RuntimeError("No finite posterior cells are available.")
+
+    misfit_ref = float(np.min(misfit[finite]))
+    log_weight = np.full(len(df), -np.inf, dtype=float)
+    log_weight[finite] = 0.5 * log_det[finite] - 0.5 * (misfit[finite] - misfit_ref) / variance_scale
+    log_norm = float(logsumexp(log_weight[finite]))
+    log_posterior = log_weight - log_norm
+    probability = np.exp(log_posterior)
+
+    df["log_weight"] = log_weight
+    df["log_posterior"] = log_posterior
+    df["posterior_probability"] = probability
+    sum_c = float(solution.sum_c)
+    df["native_probability"] = df["native_weight"] / sum_c if np.isfinite(sum_c) and sum_c > 0 else np.nan
+
+    order = np.argsort(log_posterior)[::-1]
+    rank = np.empty(len(df), dtype=np.int64)
+    rank[order] = np.arange(1, len(df) + 1, dtype=np.int64)
+    sorted_p = probability[order]
+    cumulative_sorted = np.cumsum(sorted_p)
+    cumulative = np.empty(len(df), dtype=float)
+    cumulative[order] = cumulative_sorted
+    cumulative_before = cumulative_sorted - sorted_p
+    hpd68 = np.zeros(len(df), dtype=bool)
+    hpd95 = np.zeros(len(df), dtype=bool)
+    hpd68[order] = cumulative_before < 0.68
+    hpd95[order] = cumulative_before < 0.95
+    df["posterior_rank"] = rank
+    df["cumulative_probability"] = cumulative
+    df["in_hpd68"] = hpd68
+    df["in_hpd95"] = hpd95
+    return df
+
+
+def compute_posterior_diagnostics(
+    solution,
+    posterior_cells: pd.DataFrame,
+    *,
+    variance_scale_diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Summarize posterior concentration, discretization and active boundaries."""
+    p = posterior_cells["posterior_probability"].to_numpy(dtype=float)
+    logp = posterior_cells["log_posterior"].to_numpy(dtype=float)
+    positive = p > 0
+    entropy = float(-np.sum(p[positive] * logp[positive])) if positive.any() else np.nan
+    n_cells = len(p)
+    normalized_entropy = entropy / math.log(n_cells) if n_cells > 1 and np.isfinite(entropy) else 0.0
+    effective_cells = float(1.0 / np.sum(p ** 2))
+    horizontal_fixed = bool(posterior_cells["horizontal_search_fixed"].iloc[0])
+    time_fixed = bool(posterior_cells["time_search_fixed"].iloc[0])
+
+    diagnostics: dict[str, Any] = {
+        "n_space_time_cells": n_cells,
+        "posterior_probability_sum": float(np.sum(p)),
+        "posterior_mode_probability": float(np.max(p)),
+        "posterior_entropy": entropy,
+        "posterior_normalized_entropy": normalized_entropy,
+        "posterior_effective_cells": effective_cells,
+        "n_cells_hpd68": int(posterior_cells["in_hpd68"].sum()),
+        "n_cells_hpd95": int(posterior_cells["in_hpd95"].sum()),
+        "horizontal_search_fixed": horizontal_fixed,
+        "time_search_fixed": time_fixed,
+        "posterior_horizontal_boundary_probability": (
+            np.nan if horizontal_fixed else float(p[posterior_cells["on_horizontal_boundary"].to_numpy()].sum())
+        ),
+        "posterior_depth_floor_probability": float(p[posterior_cells["on_depth_floor"].to_numpy()].sum()),
+        "posterior_depth_ceiling_probability": float(p[posterior_cells["on_depth_ceiling"].to_numpy()].sum()),
+        "posterior_time_floor_probability": (
+            np.nan if time_fixed else float(p[posterior_cells["on_time_floor"].to_numpy()].sum())
+        ),
+        "posterior_time_ceiling_probability": (
+            np.nan if time_fixed else float(p[posterior_cells["on_time_ceiling"].to_numpy()].sum())
+        ),
+        "posterior_active_spatial_boundary_probability": float(
+            p[(
+                posterior_cells["on_horizontal_boundary"].to_numpy()
+                | posterior_cells["on_depth_floor"].to_numpy()
+                | posterior_cells["on_depth_ceiling"].to_numpy()
+            )].sum()
+        ),
+        "posterior_active_boundary_probability": float(p[posterior_cells["on_active_boundary"].to_numpy()].sum()),
+    }
+    if variance_scale_diagnostics is not None:
+        diagnostics.update(dict(variance_scale_diagnostics))
+    return diagnostics
+
+
+def _circular_angle_difference_deg(value: float, reference: float) -> float:
+    """Return the shortest signed difference between two angles in degrees."""
+    return (float(value) - float(reference) + 180.0) % 360.0 - 180.0
+
+
+def _align_nodal_planes(
+    decomposition: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Align an unordered nodal-plane pair to a reference plane ordering.
+
+    Moment-tensor decomposition returns two physically interchangeable nodal
+    planes.  Eigenvector sign choices can therefore exchange the numerical
+    ``NP1``/``NP2`` labels between nearby posterior samples even when the
+    mechanism changes smoothly.  This helper preserves the decomposition itself
+    but chooses the direct or swapped labeling whose strike/dip/rake parameters
+    are closest to the preferred solution.
+
+    Strike and rake use their shortest circular differences; dip is compared
+    linearly.  The normalized squared cost is used only to resolve the two-plane
+    permutation and has no effect on posterior probabilities or MT samples.
+    """
+    out = dict(decomposition)
+    sample = np.array([
+        [out.get("s1"), out.get("d1"), out.get("r1")],
+        [out.get("s2"), out.get("d2"), out.get("r2")],
+    ], dtype=float)
+    ref = np.array([
+        [reference.get("s1"), reference.get("d1"), reference.get("r1")],
+        [reference.get("s2"), reference.get("d2"), reference.get("r2")],
+    ], dtype=float)
+
+    if not np.isfinite(sample).all() or not np.isfinite(ref).all():
+        return out
+
+    def plane_cost(plane, target):
+        ds = _circular_angle_difference_deg(plane[0], target[0]) / 180.0
+        dd = (plane[1] - target[1]) / 90.0
+        dr = _circular_angle_difference_deg(plane[2], target[2]) / 180.0
+        return ds * ds + dd * dd + dr * dr
+
+    direct = plane_cost(sample[0], ref[0]) + plane_cost(sample[1], ref[1])
+    swapped = plane_cost(sample[0], ref[1]) + plane_cost(sample[1], ref[0])
+    if swapped < direct:
+        out["s1"], out["d1"], out["r1"] = sample[1]
+        out["s2"], out["d2"], out["r2"] = sample[0]
+    return out
+
+
+def extract_uncertainty_df(
+    solution,
+    n: int = 400,
+    *,
+    variance_scale: float = 1.0,
+    posterior_cells: pd.DataFrame | None = None,
+    random_state: int | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Draw exactly ``n`` posterior realizations using categorical cell sampling.
+
+    Nonlinear space-time cells are sampled categorically from the exact discrete
+    posterior; moment-tensor coefficients are then drawn from the selected cell's
+    conditional Gaussian covariance, optionally multiplied by a common residual
+    variance scale.  Because the two nodal planes are physically interchangeable,
+    sampled NP1/NP2 labels are finally aligned to the preferred solution before
+    reporting strike/dip/rake uncertainty.  This relabeling does not modify the
+    sampled moment tensor or its posterior probability.
+    """
+    from BayesISOLA.MT_comps import a2mt, decompose
+
+    n = int(n)
+    if n <= 0:
+        raise ValueError("n must be a positive integer.")
+    variance_scale = float(variance_scale)
+    if not np.isfinite(variance_scale) or variance_scale <= 0:
+        raise ValueError("variance_scale must be positive and finite.")
+    if posterior_cells is None:
+        posterior_cells = build_posterior_cells(solution, variance_scale=variance_scale)
+
+    probabilities = posterior_cells["posterior_probability"].to_numpy(dtype=float)
+    if not np.isclose(probabilities.sum(), 1.0, atol=1e-12):
+        raise RuntimeError("Posterior cell probabilities do not sum to one.")
+
+    rng = np.random.default_rng(random_state)
+    selected = rng.choice(len(posterior_cells), size=n, replace=True, p=probabilities)
+    counts = np.bincount(selected, minlength=len(posterior_cells))
+    label_columns = [
+        "cell_index", "grid_index", "grid_point_id", "shift_index",
+        "centroid_time_shift_s", "centroid_lat", "centroid_lon", "centroid_depth_km",
+        "offset_north_m", "offset_east_m", "horizontal_search_fixed",
+        "on_horizontal_boundary", "on_depth_floor", "on_depth_ceiling",
+        "on_time_floor", "on_time_ceiling", "on_active_boundary",
+        "posterior_probability",
+    ]
+    sampled_labels = posterior_cells.iloc[selected][label_columns].reset_index(drop=True)
+    sampled_labels.insert(0, "draw", np.arange(1, n + 1, dtype=int))
+    sampled_labels["space_time_cell_n_draws"] = counts[selected]
+    sampled_labels["centroid_time"] = [
+        (solution.event["t"] + float(shift)).datetime
+        for shift in sampled_labels["centroid_time_shift_s"].to_numpy()
+    ]
+
+    preferred_decomposition = solution.mt_decomp
+    if not preferred_decomposition:
+        raise RuntimeError(
+            "solution.mt_decomp is empty -- resolve_MT must be constructed "
+            "before uncertainty sampling."
+        )
+
+    mechanism_rows: list[dict[str, Any] | None] = [None] * n
+    for cell_position in np.flatnonzero(counts):
+        draw_positions = np.flatnonzero(selected == cell_position)
+        row = posterior_cells.iloc[int(cell_position)]
+        gp = solution.grid[int(row["grid_index"])]
+        GP = gp["shifts"][int(row["shift_index"])]
+        a_mean = np.asarray(GP["a"], dtype=float).reshape(-1)
+        if solution.deviatoric:
+            a_mean = a_mean[:5]
+        cov = np.asarray(GP["GtGinv"], dtype=float)
+        cov = cov[: len(a_mean), : len(a_mean)] * variance_scale
+        cov = 0.5 * (cov + cov.T)
+        a_draws = rng.multivariate_normal(a_mean, cov, size=len(draw_positions))
+
+        for position, a_draw in zip(draw_positions, a_draws):
+            a_col = np.asarray(a_draw, dtype=float)[:, None]
+            if solution.deviatoric:
+                a_col = np.vstack([a_col, [[0.0]]])
+            mt = a2mt(a_col)
+            dec = _align_nodal_planes(decompose(mt), preferred_decomposition)
+            mechanism_rows[int(position)] = {
+                "dc_percent": dec["dc_perc"],
+                "clvd_percent": dec["clvd_perc"],
+                "iso_percent": dec["iso_perc"],
+                "moment_Nm": dec["mom"],
+                "Mw": dec["Mw"],
+                "NP1_strike_deg": dec["s1"], "NP1_dip_deg": dec["d1"], "NP1_rake_deg": dec["r1"],
+                "NP2_strike_deg": dec["s2"], "NP2_dip_deg": dec["d2"], "NP2_rake_deg": dec["r2"],
             }
-            allocation_rows.extend(dict(label) for _ in range(n_gp))
-            used_grid_points.add(int(grid_index))
-            used_shift_indices.add(shift_index_int)
-            used_cells.add((int(grid_index), shift_index_int))
 
-    n_allocated = len(allocation_rows)
-    sampled = shim.plot_uncertainty(n=n, just_return_histogram_data=True)
-
+    mechanism = pd.DataFrame(mechanism_rows)
+    df = pd.concat([sampled_labels, mechanism], axis=1)
     diagnostics = {
         "n_requested": n,
-        "n_allocated": n_allocated,
-        "n_sampled": 0 if not sampled else len(sampled["Mw"]),
-        "allocation_difference": n_allocated - n,
-        "n_space_time_cells_used": len(used_cells),
-        "n_grid_points_used": len(used_grid_points),
-        "n_time_shifts_used": len(used_shift_indices),
-        "spatially_degenerate": len(used_grid_points) <= 1,
-        "temporally_degenerate": len(used_shift_indices) <= 1,
-        "degenerate_allocation": len(used_cells) <= 1,
+        "n_sampled": len(df),
+        "n_space_time_cells_used": int(np.count_nonzero(counts)),
+        "n_grid_points_used": int(df["grid_index"].nunique()),
+        "n_time_shifts_used": int(df["shift_index"].nunique()),
+        "spatially_degenerate": int(df["grid_index"].nunique()) <= 1,
+        "temporally_degenerate": int(df["shift_index"].nunique()) <= 1,
+        "degenerate_allocation": int(np.count_nonzero(counts)) <= 1,
+        "variance_scale": variance_scale,
+        "sd_scale": math.sqrt(variance_scale),
+        "random_state": random_state,
+        "sampling_method": "categorical_cells_conditional_gaussian_mt",
+    }
+    return df, diagnostics
+
+
+_STATION_JACKKNIFE_DEFAULTS: dict[str, Any] = {
+    "jackknife_min_stations": 4,
+}
+
+
+def _normalize_station_jackknife(
+    station_jackknife: bool | Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Normalize optional single-station fixed-grid jackknife settings."""
+    if station_jackknife is None or station_jackknife is False:
+        return {"enabled": False, **_STATION_JACKKNIFE_DEFAULTS}
+    if station_jackknife is True:
+        config = dict(_STATION_JACKKNIFE_DEFAULTS)
+    elif isinstance(station_jackknife, Mapping):
+        unknown = sorted(set(station_jackknife) - set(_STATION_JACKKNIFE_DEFAULTS))
+        if unknown:
+            allowed = ", ".join(_STATION_JACKKNIFE_DEFAULTS)
+            raise ValueError(
+                f"Unknown station_jackknife option(s): {', '.join(map(str, unknown))}. "
+                f"Allowed keys are: {allowed}."
+            )
+        config = dict(_STATION_JACKKNIFE_DEFAULTS)
+        config.update(dict(station_jackknife))
+    else:
+        raise TypeError("station_jackknife must be None, a boolean, or a mapping.")
+    config["jackknife_min_stations"] = int(config["jackknife_min_stations"])
+    if config["jackknife_min_stations"] < 1:
+        raise ValueError("jackknife_min_stations must be >= 1.")
+    return {"enabled": True, **config}
+
+
+def _solve_omission_normal_equations(
+    A_total: np.ndarray,
+    B_total: np.ndarray,
+    q_total: np.ndarray,
+    A_removed: np.ndarray,
+    B_removed: np.ndarray,
+    q_removed: np.ndarray,
+) -> dict[str, Any]:
+    """Solve all source-time shifts after subtracting one station's statistics.
+
+    ``B`` has shape ``(n_parameters, n_shifts)`` and ``q`` contains the whitened
+    data norm for each shift. This is algebraically identical to rebuilding the
+    reduced design/data matrices and solving them directly. ``numpy.linalg.solve``
+    is used instead of explicitly forming ``A^{-1}``, which is both faster and
+    numerically preferable. The condition number is intentionally evaluated only
+    for the final winning leave-one-out solution, not for every grid/station trial.
+    """
+    A = np.asarray(A_total, dtype=float) - np.asarray(A_removed, dtype=float)
+    B = np.asarray(B_total, dtype=float) - np.asarray(B_removed, dtype=float)
+    q = np.asarray(q_total, dtype=float) - np.asarray(q_removed, dtype=float)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError("A_total/A_removed must define square normal matrices.")
+    if B.shape[0] != A.shape[0] or q.ndim != 1 or B.shape[1] != q.size:
+        raise ValueError("B/q dimensions are inconsistent with the normal matrix.")
+    if not np.isfinite(A).all() or not np.isfinite(B).all() or not np.isfinite(q).all():
+        raise ValueError("Normal-equation statistics must be finite.")
+    if np.any(q <= 0.0):
+        raise np.linalg.LinAlgError("Station omission produced a non-positive data norm.")
+
+    coefficients = np.linalg.solve(A, B)
+    misfit = q - np.sum(B * coefficients, axis=0)
+    tolerance = 1e-10 * np.maximum(q, 1.0)
+    if np.any(misfit < -tolerance):
+        raise np.linalg.LinAlgError(
+            "Station-omission normal equations produced a negative minimized misfit."
+        )
+    misfit = np.maximum(misfit, 0.0)
+    variance_reduction = 1.0 - misfit / q
+    return {
+        "A": A,
+        "coefficients": coefficients,
+        "misfit": misfit,
+        "norm_d": q,
+        "variance_reduction": variance_reduction,
     }
 
-    if not sampled:
-        diagnostics["note"] = (
-            "BayesISOLA returned no uncertainty table because the rounded posterior allocation "
-            "contained at most one realization. Increase n before interpreting mechanism or "
-            "space-time uncertainty."
-        )
-        return pd.DataFrame(), diagnostics
+def _jackknife_design_matrix(solution, data, gp: Mapping[str, Any]) -> np.ndarray:
+    """Reconstruct the exact filtered/weighted design matrix used by ``invert``."""
+    from obspy import UTCDateTime
+    from BayesISOLA.fileformats import read_elemse, read_elemse_from_files
+    from BayesISOLA.helpers import my_filter
+    from BayesISOLA._paths import green_path
 
-    n_draws = len(sampled["Mw"])
-    if n_allocated != n_draws:
+    stations = solution.inp.stations
+    nr = solution.inp.nr
+    ne = 5 if solution.deviatoric else 6
+    elemse_path = gp.get("path")
+    if elemse_path:
+        elemse = read_elemse_from_files(
+            nr, elemse_path, stations, solution.inp.event["t"], data.samprate,
+            data.npts_elemse, data.invert_displacement,
+        )
+    else:
+        elemse = read_elemse(
+            nr, data.npts_elemse,
+            green_path(solution.inp.green_dir, "elemse" + str(gp["id"]) + ".dat"),
+            stations, data.invert_displacement,
+        )
+
+    for r in range(nr):
+        for e in range(ne):
+            my_filter(elemse[r][e], stations[r]["fmin"], stations[r]["fmax"])
+    if data.npts_slice != data.npts_elemse:
+        for st6 in elemse:
+            for trace in st6:
+                trace.trim(UTCDateTime(0) + data.elemse_start_origin)
+    npts = int(data.npts_slice)
+
+    G = np.empty((int(data.components) * npts, ne), dtype=float)
+    component_row = 0
+    for r, station in enumerate(stations):
+        for comp, use_key, weight_key in zip(
+            range(3), ("useZ", "useN", "useE"), ("weightZ", "weightN", "weightE")
+        ):
+            if station[use_key]:
+                sl = slice(component_row * npts, (component_row + 1) * npts)
+                weight = float(station[weight_key])
+                for e in range(ne):
+                    G[sl, e] = np.asarray(elemse[r][e][comp].data[:npts], dtype=float) * weight
+                component_row += 1
+    if component_row != int(data.components):
         raise RuntimeError(
-            "BayesISOLA uncertainty allocation and returned mechanism draws have different lengths "
-            f"({n_allocated} vs {n_draws}); refusing to attach potentially misaligned space-time labels."
+            f"Jackknife design matrix assembled {component_row} component blocks but data.components={data.components}."
+        )
+    return G
+
+
+def _jackknife_station_blocks(stations: Sequence[Mapping[str, Any]], npts: int) -> list[dict[str, Any]]:
+    """Return active station row slices in BayesISOLA's concatenated data order."""
+    blocks: list[dict[str, Any]] = []
+    offset = 0
+    for station_index, station in enumerate(stations):
+        used = [
+            comp for comp, key in zip(("Z", "N", "E"), ("useZ", "useN", "useE"))
+            if bool(station[key])
+        ]
+        size = len(used) * int(npts)
+        if size:
+            blocks.append({
+                "station_index": station_index,
+                "station": station,
+                "used_components": tuple(used),
+                "slice": slice(offset, offset + size),
+            })
+        offset += size
+    return blocks
+
+
+def _moment_tensor_matrix_from_a(a: np.ndarray) -> np.ndarray:
+    """Convert six elementary-source coefficients to a symmetric NED MT matrix."""
+    from BayesISOLA.MT_comps import a2mt
+    mt = np.asarray(a2mt(np.asarray(a, dtype=float).reshape(6, 1)), dtype=float)
+    return np.array([
+        [mt[0], mt[3], mt[4]],
+        [mt[3], mt[1], mt[5]],
+        [mt[4], mt[5], mt[2]],
+    ], dtype=float)
+
+
+def _azimuth_geometry_from_solution_stations(
+    stations: Sequence[Mapping[str, Any]],
+    omitted_index: int | None = None,
+) -> tuple[int, float]:
+    """Return occupied 45-degree sectors and maximum azimuthal gap after omission."""
+    azimuths = [
+        float(station["az"]) % 360.0
+        for i, station in enumerate(stations)
+        if i != omitted_index
+        and any(bool(station[key]) for key in ("useZ", "useN", "useE"))
+        and station.get("az") is not None
+        and np.isfinite(float(station["az"]))
+    ]
+    if not azimuths:
+        return 0, np.nan
+    azimuths = np.sort(np.asarray(azimuths, dtype=float))
+    sectors = np.floor(azimuths / 45.0).astype(int)
+    gaps = np.diff(np.r_[azimuths, azimuths[0] + 360.0])
+    return int(np.unique(sectors).size), float(np.max(gaps))
+
+
+def _jackknife_grid_candidates(
+    solution,
+    data,
+    gp: Mapping[str, Any],
+    *,
+    factorized_noise: bool,
+    covariance_factors,
+    stations: Sequence[Mapping[str, Any]],
+    npts: int,
+    D: np.ndarray,
+    q_total: np.ndarray,
+    blocks: Sequence[Mapping[str, Any]],
+    q_station: Sequence[np.ndarray],
+) -> dict[int, dict[str, Any]]:
+    """Evaluate all station omissions at one existing source-grid point.
+
+    The function is deliberately side-effect free so final-grid points can be
+    evaluated concurrently by :class:`~concurrent.futures.ThreadPoolExecutor`.
+    Each returned entry is the best source-time shift for one omitted station at
+    this grid point; the caller then performs the unchanged global comparison over
+    all grid points.
+    """
+    from BayesISOLA.inverse_problem import whiten_covariance_array
+
+    G = _jackknife_design_matrix(solution, data, gp)
+    if factorized_noise:
+        G = whiten_covariance_array(G, covariance_factors, stations, npts)
+
+    A_total = G.T @ G
+    B_total = G.T @ D
+    candidates: dict[int, dict[str, Any]] = {}
+
+    for block, q_removed in zip(blocks, q_station):
+        station_index = int(block["station_index"])
+        sl = block["slice"]
+        Gs = G[sl, :]
+        Ds = D[sl, :]
+        A_removed = Gs.T @ Gs
+        B_removed = Gs.T @ Ds
+
+        try:
+            solved = _solve_omission_normal_equations(
+                A_total, B_total, q_total, A_removed, B_removed, q_removed
+            )
+        except (np.linalg.LinAlgError, ValueError):
+            continue
+
+        vr = solved["variance_reduction"]
+        if not np.isfinite(vr).any():
+            continue
+        shift_index = int(np.nanargmax(vr))
+        candidate_vr = float(vr[shift_index])
+        coeff = solved["coefficients"][:, shift_index]
+        a_col = coeff[:, None]
+        if solution.deviatoric:
+            a_col = np.vstack([a_col, [[0.0]]])
+
+        # ||d_s - G_s a||^2 from sufficient statistics. This avoids forming a
+        # long held-out residual vector for every grid/station trial.
+        b_removed = B_removed[:, shift_index]
+        heldout_misfit = float(
+            q_removed[shift_index]
+            - 2.0 * np.dot(coeff, b_removed)
+            + np.dot(coeff, A_removed @ coeff)
+        )
+        heldout_tolerance = 1e-10 * max(float(q_removed[shift_index]), 1.0)
+        if heldout_misfit < -heldout_tolerance:
+            continue
+        heldout_misfit = max(heldout_misfit, 0.0)
+
+        candidates[station_index] = {
+            "gp": gp,
+            "shift_index": shift_index,
+            "a": a_col,
+            "variance_reduction": candidate_vr,
+            "misfit": float(solved["misfit"][shift_index]),
+            "normal_matrix": solved["A"],
+            "heldout_misfit": heldout_misfit,
+            "heldout_n_values": int(Ds.shape[0]),
+        }
+
+    return candidates
+
+
+def _cached_station_normal_equations(
+    gp: Mapping[str, Any],
+    blocks: Sequence[Mapping[str, Any]],
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return cached station normal equations ordered like ``blocks``.
+
+    ``inverse_problem.invert`` stores these arrays only when the workflow knows
+    that a station jackknife will be requested.  Returning ``None`` preserves a
+    backward-compatible fallback for solution objects that do not contain the
+    0.2 station-wise normal-equation cache.
+    """
+    indices = gp.get("_station_normal_indices")
+    station_GtG = gp.get("_station_GtG")
+    station_Gtd = gp.get("_station_Gtd")
+    if indices is None or station_GtG is None or station_Gtd is None:
+        return None
+
+    indices = np.asarray(indices, dtype=int).reshape(-1)
+    station_GtG = np.asarray(station_GtG, dtype=float)
+    station_Gtd = np.asarray(station_Gtd, dtype=float)
+    expected = [int(block["station_index"]) for block in blocks]
+
+    if station_GtG.ndim != 3 or station_Gtd.ndim != 3:
+        raise ValueError("Cached station normal equations must be three-dimensional arrays.")
+    if station_GtG.shape[0] != len(indices) or station_Gtd.shape[0] != len(indices):
+        raise ValueError("Cached station normal-equation arrays have inconsistent station counts.")
+
+    position = {int(station_index): i for i, station_index in enumerate(indices)}
+    missing = [station_index for station_index in expected if station_index not in position]
+    if missing:
+        raise ValueError(
+            "Cached station normal equations are missing active station index/indices: "
+            + ", ".join(map(str, missing))
+        )
+    order = [position[station_index] for station_index in expected]
+    return station_GtG[order], station_Gtd[order]
+
+
+def _jackknife_grid_candidates_cached(
+    gp: Mapping[str, Any],
+    *,
+    blocks: Sequence[Mapping[str, Any]],
+    q_total: np.ndarray,
+    q_station: Sequence[np.ndarray],
+    deviatoric: bool,
+) -> dict[int, dict[str, Any]]:
+    """Evaluate all station omissions using inversion-cached sufficient statistics."""
+    cached = _cached_station_normal_equations(gp, blocks)
+    if cached is None:
+        raise RuntimeError("Cached station normal equations are not available for this grid point.")
+    station_GtG, station_Gtd = cached
+
+    A_total = np.sum(station_GtG, axis=0)
+    B_total = np.sum(station_Gtd, axis=0)
+    candidates: dict[int, dict[str, Any]] = {}
+
+    for j, (block, q_removed) in enumerate(zip(blocks, q_station)):
+        station_index = int(block["station_index"])
+        A_removed = station_GtG[j]
+        B_removed = station_Gtd[j]
+
+        try:
+            solved = _solve_omission_normal_equations(
+                A_total,
+                B_total,
+                q_total,
+                A_removed,
+                B_removed,
+                q_removed,
+            )
+        except (np.linalg.LinAlgError, ValueError):
+            continue
+
+        vr = solved["variance_reduction"]
+        if not np.isfinite(vr).any():
+            continue
+        shift_index = int(np.nanargmax(vr))
+        candidate_vr = float(vr[shift_index])
+        coeff = solved["coefficients"][:, shift_index]
+        a_col = coeff[:, None]
+        if deviatoric:
+            a_col = np.vstack([a_col, [[0.0]]])
+
+        b_removed = B_removed[:, shift_index]
+        heldout_misfit = float(
+            q_removed[shift_index]
+            - 2.0 * np.dot(coeff, b_removed)
+            + np.dot(coeff, A_removed @ coeff)
+        )
+        heldout_tolerance = 1e-10 * max(float(q_removed[shift_index]), 1.0)
+        if heldout_misfit < -heldout_tolerance:
+            continue
+        heldout_misfit = max(heldout_misfit, 0.0)
+
+        candidates[station_index] = {
+            "gp": gp,
+            "shift_index": shift_index,
+            "a": a_col,
+            "variance_reduction": candidate_vr,
+            "misfit": float(solved["misfit"][shift_index]),
+            "normal_matrix": solved["A"],
+            "heldout_misfit": heldout_misfit,
+            "heldout_n_values": int(block["slice"].stop - block["slice"].start),
+        }
+
+    return candidates
+
+
+def compute_station_jackknife(
+    solution,
+    data,
+    cova,
+    *,
+    jackknife_min_stations: int = 4,
+    threads: int = 1,
+) -> pd.DataFrame:
+    """Evaluate exact single-station omissions on the final converged grid.
+
+    No acquisition, Green-function generation, grid expansion or refinement is
+    repeated.  At each existing spatial point the station block is subtracted
+    from the full normal equations and every source-time shift is solved at once.
+    The preferred leave-one-out source therefore follows BayesISOLA's native
+    maximum-variance-reduction criterion, conditional on the final full-solution
+    grid.  A leave-one-out mode on that grid boundary is reported, not refined.
+
+    Parameters
+    ----------
+    solution, data, cova
+        Final BayesISOLA inversion objects. When the solution was produced by
+        ``run_auto_cmt`` with jackknife enabled, each grid point already contains
+        small station-wise normal-equation contributions retained during the main
+        inversion. The jackknife then requires no GF file I/O or filtering. Older
+        solution objects transparently use the exact legacy reconstruction path.
+    jackknife_min_stations : int, default=4
+        Minimum number of active stations that must remain after one station is
+        omitted.
+    threads : int, default=1
+        Number of concurrent grid evaluations used only by the backward-compatible
+        GF-reconstruction fallback. The cached-normal-equation path uses inexpensive
+        small-matrix solves and therefore runs serially to avoid executor overhead.
+    """
+    from BayesISOLA.inverse_problem import whiten_covariance_array
+    from BayesISOLA.MT_comps import a2mt, decompose
+    from BayesISOLA.kagan import kagan_angle_mt
+
+    jackknife_min_stations = int(jackknife_min_stations)
+    if jackknife_min_stations < 1:
+        raise ValueError("jackknife_min_stations must be >= 1.")
+    threads = int(threads)
+    if threads < 1:
+        raise ValueError("threads must be >= 1.")
+    if getattr(cova, "Cd_inv_shifts", None):
+        raise NotImplementedError("Station jackknife does not support shift-dependent ACF covariance.")
+    factorized_noise = bool(getattr(cova, "factorized_noise", False))
+    if bool(getattr(cova, "has_covariance", False)) and not factorized_noise:
+        raise NotImplementedError(
+            "Station jackknife currently supports no covariance or factorized noise covariance only."
         )
 
-    scalar_keys = ("dc", "clvd", "iso", "moment", "Mw")
-    if any(len(sampled[key]) != n_draws for key in scalar_keys):
-        raise RuntimeError("BayesISOLA uncertainty scalar arrays do not share a common draw length.")
-    if any(len(sampled[key]) < 2 * n_draws for key in ("strike", "dip", "rake")):
-        raise RuntimeError("BayesISOLA uncertainty nodal-plane arrays are shorter than two values per draw.")
+    stations = solution.inp.stations
+    npts = int(data.npts_slice)
+    blocks = _jackknife_station_blocks(stations, npts)
+    n_active_stations = len(blocks)
+    if not blocks:
+        return pd.DataFrame()
 
-    strike = np.asarray(sampled["strike"])
-    dip = np.asarray(sampled["dip"])
-    rake = np.asarray(sampled["rake"])
-    df = pd.DataFrame(allocation_rows)
-    df.insert(0, "draw", np.arange(1, n_draws + 1, dtype=int))
-    df["dc_percent"] = sampled["dc"]
-    df["clvd_percent"] = sampled["clvd"]
-    df["iso_percent"] = sampled["iso"]
-    df["moment_Nm"] = sampled["moment"]
-    df["Mw"] = sampled["Mw"]
-    df["NP1_strike_deg"] = strike[0::2][:n_draws]
-    df["NP1_dip_deg"] = dip[0::2][:n_draws]
-    df["NP1_rake_deg"] = rake[0::2][:n_draws]
-    df["NP2_strike_deg"] = strike[1::2][:n_draws]
-    df["NP2_dip_deg"] = dip[1::2][:n_draws]
-    df["NP2_rake_deg"] = rake[1::2][:n_draws]
+    d_shifts = list(data.d_shifts)
+    covariance_factors = {"LT": cova.LT, "LT3": cova.LT3} if factorized_noise else None
+    if factorized_noise:
+        d_columns = [
+            whiten_covariance_array(d, covariance_factors, stations, npts).reshape(-1)
+            for d in d_shifts
+        ]
+    else:
+        d_columns = [np.asarray(d, dtype=float).reshape(-1) for d in d_shifts]
+    D = np.column_stack(d_columns)
+    q_total = np.sum(D * D, axis=0)
+    q_station = [np.sum(D[block["slice"], :] ** 2, axis=0) for block in blocks]
 
-    if diagnostics["degenerate_allocation"]:
-        diagnostics["note"] = (
-            "All returned realizations occupy one discrete space-time cell. Location/time columns "
-            "therefore repeat exactly; mechanism spread is conditional on that cell's GtGinv covariance."
+    full_gp = solution.centroid
+    full_shift_index = int(full_gp["shift_idx"])
+    full_a = np.asarray(full_gp["a"], dtype=float).reshape(6, 1)
+    full_mt = _moment_tensor_matrix_from_a(full_a)
+    full_decomp = solution.mt_decomp
+    valid_grid_points = [gp for gp in solution.grid if not gp.get("err")]
+
+    # Fast 0.2 path: every grid-point inversion can retain each
+    # station's contributions to G.T@G and G.T@d while the filtered design
+    # matrix is already in memory.  If all final-grid points contain those
+    # statistics, the jackknife never reopens an elementary-seismogram file.
+    cached_fast_path = bool(valid_grid_points) and all(
+        gp.get("_station_normal_indices") is not None
+        and gp.get("_station_GtG") is not None
+        and gp.get("_station_Gtd") is not None
+        for gp in valid_grid_points
+    )
+
+    full_station_metrics: dict[int, dict[str, float]] = {}
+    stored_full_misfit = float(full_gp["misfit"])
+
+    if cached_fast_path:
+        full_cached = _cached_station_normal_equations(full_gp, blocks)
+        if full_cached is None:
+            raise RuntimeError("Preferred grid point is missing cached jackknife statistics.")
+        station_GtG, station_Gtd = full_cached
+        coeff = full_a[: station_GtG.shape[1], 0]
+        full_misfit = 0.0
+
+        for j, block in enumerate(blocks):
+            q = float(q_station[j][full_shift_index])
+            A = station_GtG[j]
+            b = station_Gtd[j, :, full_shift_index]
+            misfit = float(q - 2.0 * np.dot(coeff, b) + np.dot(coeff, A @ coeff))
+            tolerance = 1e-10 * max(q, 1.0)
+            if misfit < -tolerance:
+                raise RuntimeError(
+                    "Cached station normal equations produced a negative preferred-solution "
+                    f"misfit for station index {block['station_index']}."
+                )
+            misfit = max(misfit, 0.0)
+            full_misfit += misfit
+            n_values = int(block["slice"].stop - block["slice"].start)
+            full_station_metrics[block["station_index"]] = {
+                "misfit": misfit,
+                "rms": float(np.sqrt(misfit / n_values)),
+                "fraction": np.nan,
+            }
+
+        if full_misfit > 0.0:
+            for metrics in full_station_metrics.values():
+                metrics["fraction"] = metrics["misfit"] / full_misfit
+    else:
+        # Backward-compatible path for solution objects without the 0.2 cache.
+        # This is exact but expensive because every GF must be reread/refiltered.
+        full_G = _jackknife_design_matrix(solution, data, full_gp)
+        if factorized_noise:
+            full_G = whiten_covariance_array(full_G, covariance_factors, stations, npts)
+        full_residual = D[:, full_shift_index] - full_G @ full_a[: full_G.shape[1], 0]
+        full_misfit = float(np.dot(full_residual, full_residual))
+        for block in blocks:
+            sl = block["slice"]
+            block_residual = full_residual[sl]
+            misfit = float(np.dot(block_residual, block_residual))
+            full_station_metrics[block["station_index"]] = {
+                "misfit": misfit,
+                "rms": float(np.sqrt(misfit / block_residual.size)),
+                "fraction": misfit / full_misfit if full_misfit > 0 else np.nan,
+            }
+
+    if not np.isclose(
+        full_misfit,
+        stored_full_misfit,
+        rtol=1e-8,
+        atol=1e-8 * max(1.0, abs(stored_full_misfit)),
+    ):
+        raise RuntimeError(
+            "Jackknife sufficient statistics do not reproduce the stored preferred-cell misfit: "
+            f"recomputed={full_misfit:.12g}, stored={stored_full_misfit:.12g}."
         )
-    elif diagnostics["spatially_degenerate"] or diagnostics["temporally_degenerate"]:
-        fixed = []
-        if diagnostics["spatially_degenerate"]:
-            fixed.append("space")
-        if diagnostics["temporally_degenerate"]:
-            fixed.append("time")
-        diagnostics["note"] = (
-            "The rounded posterior allocation occupies only one sampled value in " + " and ".join(fixed) +
-            "; zero spread there reflects the discrete grid/time resolution, not zero sub-grid uncertainty."
-        )
 
-    return df, diagnostics
+    best: dict[int, dict[str, Any] | None] = {block["station_index"]: None for block in blocks}
+
+    # If the requested minimum cannot be met, the output rows are still useful
+    # diagnostics but there is no reason to scan the final grid.
+    if n_active_stations - 1 >= jackknife_min_stations and valid_grid_points:
+        if cached_fast_path:
+            grid_iterator = valid_grid_points
+
+            try:
+                from threadpoolctl import threadpool_limits
+            except ImportError:
+                blas_context = nullcontext()
+            else:
+                blas_context = threadpool_limits(limits=1, user_api="blas")
+
+            with blas_context:
+                for gp in grid_iterator:
+                    candidates = _jackknife_grid_candidates_cached(
+                        gp,
+                        blocks=blocks,
+                        q_total=q_total,
+                        q_station=q_station,
+                        deviatoric=bool(solution.deviatoric),
+                    )
+                    for station_index, candidate in candidates.items():
+                        current = best[station_index]
+                        if (
+                            current is None
+                            or float(candidate["variance_reduction"])
+                            > float(current["variance_reduction"])
+                        ):
+                            best[station_index] = candidate
+        else:
+            def evaluate_grid_point(gp):
+                return _jackknife_grid_candidates(
+                    solution, data, gp,
+                    factorized_noise=factorized_noise,
+                    covariance_factors=covariance_factors,
+                    stations=stations,
+                    npts=npts,
+                    D=D,
+                    q_total=q_total,
+                    blocks=blocks,
+                    q_station=q_station,
+                )
+
+            n_workers = min(threads, len(valid_grid_points))
+            if n_workers > 1:
+                try:
+                    from threadpoolctl import threadpool_limits
+                except ImportError:
+                    blas_context = nullcontext()
+                else:
+                    # Each jackknife task is already parallel at the Python level.
+                    # Prevent small BLAS operations from spawning nested worker pools.
+                    blas_context = threadpool_limits(limits=1, user_api="blas")
+
+                executor = ThreadPoolExecutor(max_workers=n_workers)
+                with blas_context, executor:
+                    grid_iterator = executor.map(evaluate_grid_point, valid_grid_points)
+                    for candidates in grid_iterator:
+                        for station_index, candidate in candidates.items():
+                            current = best[station_index]
+                            if (
+                                current is None
+                                or float(candidate["variance_reduction"])
+                                > float(current["variance_reduction"])
+                            ):
+                                best[station_index] = candidate
+            else:
+                grid_iterator = valid_grid_points
+                for gp in grid_iterator:
+                    candidates = evaluate_grid_point(gp)
+                    for station_index, candidate in candidates.items():
+                        current = best[station_index]
+                        if (
+                            current is None
+                            or float(candidate["variance_reduction"])
+                            > float(current["variance_reduction"])
+                        ):
+                            best[station_index] = candidate
+
+    rows: list[dict[str, Any]] = []
+    for block in blocks:
+        station_index = block["station_index"]
+        station = block["station"]
+        n_remaining = n_active_stations - 1
+        used_components = block["used_components"]
+        native_vr = [
+            station.get(f"VR_{comp}") for comp in used_components
+            if station.get(f"VR_{comp}") is not None and np.isfinite(float(station.get(f"VR_{comp}")))
+        ]
+        base = {
+            "network": station.get("network"),
+            "station": station.get("code"),
+            "location": station.get("location"),
+            "n_components": len(used_components),
+            "n_stations_remaining": n_remaining,
+            "distance_km": float(station.get("dist", np.nan)) / 1000.0,
+            "azimuth_deg": station.get("az", np.nan),
+            "full_Mw": full_decomp.get("Mw", np.nan),
+            "full_depth_km": float(full_gp["z"]) / 1000.0,
+            "full_station_fit": float(np.mean(native_vr)) if native_vr else np.nan,
+            "full_station_whitened_rms": full_station_metrics[station_index]["rms"],
+            "full_station_misfit_fraction": full_station_metrics[station_index]["fraction"],
+        }
+        if n_remaining < jackknife_min_stations:
+            rows.append({
+                **base,
+                "loo_Mw": np.nan, "delta_Mw": np.nan,
+                "loo_depth_km": np.nan, "delta_depth_km": np.nan,
+                "centroid_shift_km": np.nan, "delta_time_s": np.nan,
+                "kagan_angle_deg": np.nan, "loo_condition_number": np.nan,
+                "loo_variance_reduction": np.nan,
+                "loo_DC_percent": np.nan, "loo_CLVD_percent": np.nan, "loo_ISO_percent": np.nan,
+                "loo_NP1_strike_deg": np.nan, "loo_NP1_dip_deg": np.nan, "loo_NP1_rake_deg": np.nan,
+                "loo_NP2_strike_deg": np.nan, "loo_NP2_dip_deg": np.nan, "loo_NP2_rake_deg": np.nan,
+                "heldout_whitened_misfit": np.nan,
+                "heldout_mean_squared_whitened_residual": np.nan,
+                "heldout_rms_whitened_residual": np.nan,
+                "loo_n_azimuth_sectors": np.nan, "loo_azimuthal_gap_deg": np.nan,
+                "loo_on_grid_edge": np.nan,
+                "qc_flags": "insufficient_remaining_stations",
+            })
+            continue
+
+        candidate = best[station_index]
+        if candidate is None:
+            rows.append({
+                **base,
+                "loo_Mw": np.nan, "delta_Mw": np.nan,
+                "loo_depth_km": np.nan, "delta_depth_km": np.nan,
+                "centroid_shift_km": np.nan, "delta_time_s": np.nan,
+                "kagan_angle_deg": np.nan, "loo_condition_number": np.nan,
+                "loo_variance_reduction": np.nan,
+                "loo_DC_percent": np.nan, "loo_CLVD_percent": np.nan, "loo_ISO_percent": np.nan,
+                "loo_NP1_strike_deg": np.nan, "loo_NP1_dip_deg": np.nan, "loo_NP1_rake_deg": np.nan,
+                "loo_NP2_strike_deg": np.nan, "loo_NP2_dip_deg": np.nan, "loo_NP2_rake_deg": np.nan,
+                "heldout_whitened_misfit": np.nan,
+                "heldout_mean_squared_whitened_residual": np.nan,
+                "heldout_rms_whitened_residual": np.nan,
+                "loo_n_azimuth_sectors": np.nan, "loo_azimuthal_gap_deg": np.nan,
+                "loo_on_grid_edge": np.nan,
+                "qc_flags": "no_valid_loo_solution",
+            })
+            continue
+
+        gp = candidate["gp"]
+        a = candidate["a"]
+        dec = _align_nodal_planes(decompose(a2mt(a)), full_decomp)
+        loo_mt = _moment_tensor_matrix_from_a(a)
+        try:
+            kagan = float(kagan_angle_mt(full_mt, loo_mt))
+        except ValueError:
+            kagan = np.nan
+        loo_shift_s = float(data.shifts[int(candidate["shift_index"])])
+        full_shift_s = float(full_gp["shift"])
+        spatial_shift_km = math.sqrt(
+            (float(gp["x"]) - float(full_gp["x"])) ** 2
+            + (float(gp["y"]) - float(full_gp["y"])) ** 2
+            + (float(gp["z"]) - float(full_gp["z"])) ** 2
+        ) / 1000.0
+        flags = _grid_boundary_flags(solution.g, gp)
+        n_sectors, az_gap = _azimuth_geometry_from_solution_stations(stations, omitted_index=station_index)
+        heldout_misfit = float(candidate["heldout_misfit"])
+        heldout_n = int(candidate["heldout_n_values"])
+        qc_flags = []
+        if bool(flags["on_active_spatial_boundary"]):
+            qc_flags.append("loo_grid_boundary")
+        if n_remaining == jackknife_min_stations:
+            qc_flags.append("minimum_station_count")
+
+        rows.append({
+            **base,
+            "loo_Mw": dec["Mw"], "delta_Mw": dec["Mw"] - full_decomp["Mw"],
+            "loo_depth_km": float(gp["z"]) / 1000.0,
+            "delta_depth_km": float(gp["z"] - full_gp["z"]) / 1000.0,
+            "centroid_shift_km": spatial_shift_km,
+            "delta_time_s": loo_shift_s - full_shift_s,
+            "kagan_angle_deg": kagan,
+            "loo_condition_number": float(
+                np.sqrt(np.linalg.cond(np.asarray(candidate["normal_matrix"], dtype=float)))
+            ),
+            "loo_variance_reduction": candidate["variance_reduction"],
+            "loo_DC_percent": dec["dc_perc"],
+            "loo_CLVD_percent": dec["clvd_perc"],
+            "loo_ISO_percent": dec["iso_perc"],
+            "loo_NP1_strike_deg": dec["s1"], "loo_NP1_dip_deg": dec["d1"], "loo_NP1_rake_deg": dec["r1"],
+            "loo_NP2_strike_deg": dec["s2"], "loo_NP2_dip_deg": dec["d2"], "loo_NP2_rake_deg": dec["r2"],
+            "heldout_whitened_misfit": heldout_misfit,
+            "heldout_mean_squared_whitened_residual": heldout_misfit / heldout_n,
+            "heldout_rms_whitened_residual": math.sqrt(heldout_misfit / heldout_n),
+            "loo_n_azimuth_sectors": n_sectors,
+            "loo_azimuthal_gap_deg": az_gap,
+            "loo_on_grid_edge": bool(flags["on_active_spatial_boundary"]),
+            "qc_flags": ";".join(qc_flags),
+        })
+
+    return pd.DataFrame(rows).sort_values(
+        ["heldout_rms_whitened_residual", "kagan_angle_deg"],
+        ascending=[False, False], na_position="last", ignore_index=True,
+    )
+
+
+def _clear_station_normal_equation_cache(solution) -> None:
+    """Remove internal jackknife sufficient statistics from grid-point dictionaries."""
+    for gp in solution.grid:
+        gp.pop("_station_normal_indices", None)
+        gp.pop("_station_GtG", None)
+        gp.pop("_station_Gtd", None)
 
 
 def _build_results(
     solution,
     *,
     n_uncertainty: int | None = None,
+    uncertainty_scale: str | float = "fixed",
+    uncertainty_scale_floor: float = 1.0,
+    uncertainty_random_state: int | None = None,
     grid_edge_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the curated in-memory results layer used by ``run_auto_cmt``."""
@@ -2628,26 +4565,48 @@ def _build_results(
     summary = pd.DataFrame([extract_solution_summary(solution)])
     station_fit = extract_station_fit_df(solution)
 
+    variance_scale, scale_diag = _resolve_uncertainty_variance_scale(
+        solution, uncertainty_scale, minimum_scale=float(uncertainty_scale_floor)
+    )
+    posterior_cells = build_posterior_cells(solution, variance_scale=variance_scale)
+    posterior_diag = compute_posterior_diagnostics(
+        solution, posterior_cells, variance_scale_diagnostics=scale_diag
+    )
+
     uncertainty = None
     uncertainty_diagnostics = None
     if n_uncertainty is not None:
         n_uncertainty = int(n_uncertainty)
         if n_uncertainty <= 0:
             raise ValueError("n_uncertainty must be a positive integer or None.")
-        uncertainty, diagnostics = extract_uncertainty_df(solution, n=n_uncertainty)
+        uncertainty, diagnostics = extract_uncertainty_df(
+            solution,
+            n=n_uncertainty,
+            variance_scale=variance_scale,
+            posterior_cells=posterior_cells,
+            random_state=uncertainty_random_state,
+        )
+        diagnostics.update(scale_diag)
         uncertainty_diagnostics = pd.DataFrame([diagnostics])
 
     return {
         "centroid": centroid,
         "summary": summary,
         "station_fit": station_fit,
+        "posterior_cells": posterior_cells,
+        "posterior_diagnostics": pd.DataFrame([posterior_diag]),
         "uncertainty": uncertainty,
         "uncertainty_diagnostics": uncertainty_diagnostics,
         "grid_edge_report": pd.DataFrame([dict(grid_edge_report)]) if grid_edge_report is not None else None,
     }
 
 
-def _write_result_tables(results: Mapping[str, Any], output_dir: str | Path) -> dict[str, Path]:
+def _write_result_tables(
+    results: Mapping[str, Any],
+    output_dir: str | Path,
+    *,
+    save_posterior_cells: bool = False,
+) -> dict[str, Path]:
     """Write an already-built results mapping without repeating stochastic sampling."""
     output_dir = Path(output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2659,12 +4618,22 @@ def _write_result_tables(results: Mapping[str, Any], output_dir: str | Path) -> 
     results["centroid"].to_csv(paths["centroid_location"], index=False)
     paths["solution_summary"] = output_dir / "solution_summary.csv"
     results["summary"].to_csv(paths["solution_summary"], index=False)
+    paths["posterior_diagnostics"] = output_dir / "posterior_diagnostics.csv"
+    results["posterior_diagnostics"].to_csv(paths["posterior_diagnostics"], index=False)
+
+    if save_posterior_cells:
+        paths["posterior_cells"] = output_dir / "posterior_cells.csv"
+        results["posterior_cells"].to_csv(paths["posterior_cells"], index=False)
 
     if results.get("uncertainty") is not None:
         paths["solution_unc_df"] = output_dir / "solution_unc_df.csv"
         results["uncertainty"].to_csv(paths["solution_unc_df"], index=False)
         paths["solution_unc_diagnostics"] = output_dir / "solution_unc_diagnostics.csv"
         results["uncertainty_diagnostics"].to_csv(paths["solution_unc_diagnostics"], index=False)
+
+    if results.get("station_jackknife") is not None:
+        paths["station_jackknife"] = output_dir / "station_jackknife.csv"
+        results["station_jackknife"].to_csv(paths["station_jackknife"], index=False)
 
     return paths
 
@@ -2674,368 +4643,34 @@ def write_solution_outputs(
     output_dir: str | Path,
     *,
     n_uncertainty: int | None = None,
+    uncertainty_scale: str | float = "fixed",
+    uncertainty_scale_floor: float = 1.0,
+    uncertainty_random_state: int | None = None,
+    save_posterior_cells: bool = False,
 ) -> dict[str, Path]:
-    """Extract and write the standard BayesISOLA scientific result tables.
+    """Extract and write BayesISOLA scientific result tables.
 
-    Station/component fit, preferred centroid and moment-tensor summary are always
-    written. ``n_uncertainty=None`` skips posterior sampling and uncertainty CSVs.
-    A positive integer requests a *target* number of BayesISOLA uncertainty
-    realizations. Because the native routine rounds each space-time cell's
-    allocation independently, the actual number of rows can differ slightly; the
-    saved diagnostics report both requested and allocated/sample counts.
-
-    ``run_auto_cmt`` builds its in-memory ``run["results"]`` mapping first and
-    writes those same objects through an internal writer so stochastic uncertainty
-    sampling occurs only once. This public function remains useful for a separately
-    constructed ``resolve_MT`` solution and retains its original return contract of
-    a mapping from result name to CSV path.
+    The 0.2 workflow uses exact log-space posterior cells and categorical
+    nonlinear-cell sampling. ``uncertainty_scale='fixed'`` reproduces the 0.1.1
+    covariance scale, while ``'residual'`` multiplies conditional MT covariance
+    by the preferred-cell reduced chi-square and applies the same scalar scale to
+    relative space-time likelihood differences.
     """
-    results = _build_results(solution, n_uncertainty=n_uncertainty)
-    return _write_result_tables(results, output_dir)
-
-
-# ---------------------------------------------------------------------------
-# CMT summary figure
-# ---------------------------------------------------------------------------
-
-def plot_cmt_summary(
-    summary,
-    centroid,
-    uncertainty=None,
-    *,
-    tensor_mode="full",
-    facecolor="white",
-    bgcolor="red",
-    show_dc_overlay=True,
-    figsize=(11.5, 6.2),
-    dpi=300,
-    output_file=None,
-    show=False,
-):
-    """
-    Plot a publication-style summary of a BayesISOLA CMT solution.
-
-    This is the operational replacement for BayesISOLA's basic single-beachball
-    figure in the helper's ``summary`` plot preset. It does not alter the native
-    inversion or decomposition. The figure combines the preferred solution with
-    a zero-trace beachball, P/T labels, the DC nodal-plane overlay, source and
-    quality metrics, moment-tensor components, nodal planes and principal axes.
-
-    BayesISOLA's native ``plot_MT`` passes the preferred six-component tensor to
-    ObsPy ``beach`` without overriding ``plot_zerotrace``; ObsPy therefore plots
-    the zero-trace/deviatoric representation even when ``deviatoric=False`` was
-    used for a full six-component inversion. This helper follows that zero-trace
-    plotting convention explicitly. For ``tensor_mode='full'`` the source table
-    and component table still report the full six-component solution, including
-    ISO, while the beachball and principal axes represent its zero-trace part.
-    For ``tensor_mode='deviatoric'`` the inversion itself is five-component and
-    ISO is reported as constrained to zero.
-
-    The beachball fill colours are controlled independently through ``facecolor``
-    and ``bgcolor``. Their defaults are white and red, respectively, providing
-    the preferred visual polarity convention for this summary figure without
-    altering or negating the moment tensor.
-
-    Parameters
-    ----------
-    summary : mapping, pandas.Series, or one-row pandas.DataFrame
-        BayesISOLA solution summary, normally ``results["summary"]``. Required
-        fields are ``Mrr``, ``Mtt``, ``Mpp``, ``Mrt``, ``Mrp``, ``Mtp``,
-        ``M0_Nm``, ``Mw``, ``DC_percent``, ``CLVD_percent``, ``ISO_percent``,
-        ``variance_reduction``, ``condition_number`` and both NP1/NP2
-        strike/dip/rake triplets. Tensor components are in the USE
-        (Up-South-East; r-theta-phi) convention and moments are in N·m.
-
-    centroid : mapping, pandas.Series, or one-row pandas.DataFrame
-        Preferred centroid information, normally ``results["centroid"]``.
-        ``centroid_depth_km`` is required.
-
-    uncertainty : optional
-        Retained only for backward call compatibility with version 0.1.6. It is
-        intentionally ignored in 0.1.7; the deterministic CMT summary no longer
-        displays uncertainty-derived ``±`` values.
-
-    tensor_mode : {"full", "deviatoric"}
-        Inversion type that produced ``summary``. ``"full"`` denotes the native
-        six-component inversion, whereas ``"deviatoric"`` denotes the
-        five-component zero-trace inversion. This controls source reporting and
-        decomposition interpretation. The beachball itself is plotted zero-trace
-        in both modes, matching BayesISOLA/ObsPy's native tensor-display
-        convention; its colour assignment is controlled separately by
-        ``facecolor`` and ``bgcolor``.
-
-    facecolor : matplotlib color, default="white"
-        Foreground beachball colour passed directly to ObsPy ``beach`` as
-        ``facecolor``. Together with the default red ``bgcolor``, this defines
-        the preferred fill convention used by the summary figure. The moment
-        tensor itself is not negated or otherwise modified.
-
-    bgcolor : matplotlib color, default="red"
-        Background beachball colour passed directly to ObsPy ``beach`` as
-        ``bgcolor``. The default red background combined with white
-        ``facecolor`` intentionally reverses the native ObsPy/BayesISOLA colour
-        assignment while leaving the moment-tensor geometry and P/T axes
-        unchanged.
-
-    show_dc_overlay : bool, default=True
-        Overlay the double-couple nodal-plane geometry derived from NP1. For a
-        non-pure-DC solution these curves need not coincide exactly with the
-        zero-trace moment-tensor beachball boundaries; the overlay is retained as
-        a useful visual comparison with the decomposed DC mechanism.
-
-    figsize : tuple, default=(11.5, 6.2)
-        Matplotlib figure size in inches.
-
-    dpi : int, default=300
-        Figure resolution.
-
-    output_file : str or pathlib.Path, optional
-        Save the figure to this path. Parent directories are created as needed.
-
-    show : bool, default=False
-        Display the figure. In IPython/Jupyter, ``display(fig)`` is used so an
-        Agg backend does not emit a non-interactive ``plt.show`` warning.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-        Generated CMT summary figure.
-    """
-    import matplotlib.pyplot as plt
-    from obspy.imaging.beachball import beach, MomentTensor, mt2axes
-
-    def as_record(obj, name):
-        if isinstance(obj, pd.DataFrame):
-            if len(obj) != 1:
-                raise ValueError(f"{name} must contain exactly one row.")
-            return obj.iloc[0].to_dict()
-        if isinstance(obj, pd.Series):
-            return obj.to_dict()
-        return dict(obj)
-
-    def format_value(value, fmt, unit=""):
-        return f"{format(float(value), fmt)}{unit}"
-
-    def format_scientific(value, unit=""):
-        return f"{float(value):.3e}{unit}"
-
-    def project_axis(axis):
-        azimuth = np.deg2rad(axis.strike)
-        radius = np.sqrt(2.0) * np.sin(np.deg2rad((90.0 - axis.dip) / 2.0))
-        return radius * np.sin(azimuth), radius * np.cos(azimuth)
-
-    def rim_xy(azimuth, radius=1.0):
-        azimuth = np.deg2rad(azimuth)
-        return radius * np.sin(azimuth), radius * np.cos(azimuth)
-
-    def choose_plane_label_azimuths(strike1, strike2):
-        candidates1 = (strike1 % 360.0, (strike1 + 180.0) % 360.0)
-        candidates2 = (strike2 % 360.0, (strike2 + 180.0) % 360.0)
-        best_pair, best_distance = None, -np.inf
-        for az1 in candidates1:
-            for az2 in candidates2:
-                distance = np.linalg.norm(np.asarray(rim_xy(az1)) - np.asarray(rim_xy(az2)))
-                if distance > best_distance:
-                    best_pair, best_distance = (az1, az2), distance
-        return best_pair
-
-    def style_table(table, *, first_col_bold=False, header=True, fontsize=9):
-        table.auto_set_font_size(False)
-        table.set_fontsize(fontsize)
-        for (row, col), cell in table.get_celld().items():
-            cell.set_edgecolor("0.72")
-            cell.set_linewidth(0.55)
-            cell.visible_edges = "B"
-            if header and row == 0:
-                cell.get_text().set_fontweight("bold")
-            if first_col_bold and col == 0 and (not header or row > 0):
-                cell.get_text().set_fontweight("bold")
-
-    summary = as_record(summary, "summary")
-    centroid = as_record(centroid, "centroid")
-    tensor_mode = str(tensor_mode).lower().strip()
-    if tensor_mode not in {"full", "deviatoric"}:
-        raise ValueError("tensor_mode must be 'full' or 'deviatoric'.")
-
-    mt = np.array([
-        summary["Mrr"], summary["Mtt"], summary["Mpp"],
-        summary["Mrt"], summary["Mrp"], summary["Mtp"],
-    ], dtype=float)
-
-    # BayesISOLA's native beachball is zero-trace even after a six-component
-    # inversion because ObsPy beach() defaults to plot_zerotrace=True. Make that
-    # behavior explicit and use the same tensor for the plotted principal axes.
-    mt_plot = mt.copy()
-    mt_plot[:3] -= np.mean(mt_plot[:3])
-
-    if tensor_mode == "deviatoric":
-        tensor_label = "Deviatoric (5-component)"
-        mt_table_values = mt_plot
-    else:
-        tensor_label = "Full MT (6-component)"
-        mt_table_values = mt
-
-    mt_obj = MomentTensor(*mt_plot, 0)
-    T, N, P = mt2axes(mt_obj)
-
-    nodal_values = [
-        summary.get("NP1_strike_deg"), summary.get("NP1_dip_deg"), summary.get("NP1_rake_deg"),
-        summary.get("NP2_strike_deg"), summary.get("NP2_dip_deg"), summary.get("NP2_rake_deg"),
-    ]
-    has_nodal_planes = all(
-        value is not None and np.isfinite(float(value)) for value in nodal_values
+    results = _build_results(
+        solution,
+        n_uncertainty=n_uncertainty,
+        uncertainty_scale=uncertainty_scale,
+        uncertainty_scale_floor=uncertainty_scale_floor,
+        uncertainty_random_state=uncertainty_random_state,
     )
-    draw_dc_overlay = bool(show_dc_overlay and has_nodal_planes)
-
-    fig = plt.figure(figsize=figsize, dpi=dpi, constrained_layout=True)
-    gs = fig.add_gridspec(1, 2, width_ratios=(1.05, 1.25))
-    ax_ball = fig.add_subplot(gs[0])
-    ax_info = fig.add_subplot(gs[1])
-    ax_info.axis("off")
-
-    ball = beach(
-        mt_plot,
-        xy=(0, 0),
-        width=2.0,
-        size=300,
-        linewidth=1.15,
-        facecolor=facecolor,
-        bgcolor=bgcolor,
-        edgecolor="black",
-        zorder=1,
-    )
-    ax_ball.add_collection(ball)
-
-    if draw_dc_overlay:
-        planes = beach(
-            (summary["NP1_strike_deg"], summary["NP1_dip_deg"], summary["NP1_rake_deg"]),
-            xy=(0, 0), width=2.0, size=300, linewidth=0.65,
-            nofill=True, edgecolor="0.35", zorder=2,
-        )
-        ax_ball.add_collection(planes)
-
-    for label, axis in (("P", P), ("T", T)):
-        x, y = project_axis(axis)
-        ax_ball.text(x, y, label, ha="center", va="center", fontsize=15, zorder=5)
-
-    if draw_dc_overlay:
-        np1_az, np2_az = choose_plane_label_azimuths(summary["NP1_strike_deg"], summary["NP2_strike_deg"])
-        for label, azimuth in (("NP1", np1_az), ("NP2", np2_az)):
-            x0, y0 = rim_xy(azimuth, 1.00)
-            x1, y1 = rim_xy(azimuth, 1.11)
-            ax_ball.annotate(
-                label, xy=(x0, y0), xytext=(x1, y1),
-                ha="left" if x1 >= 0 else "right", va="center", fontsize=9,
-                annotation_clip=False,
-                arrowprops={"arrowstyle": "-", "linewidth": 0.7, "shrinkA": 2, "shrinkB": 0},
-                zorder=6,
-            )
-
-    ax_ball.set_xlim(-1.18, 1.18)
-    ax_ball.set_ylim(-1.18, 1.18)
-    ax_ball.set_aspect("equal")
-    ax_ball.axis("off")
-    ax_ball.set_title("Centroid Moment Tensor", fontsize=13, pad=10)
-
-    depth_text = format_value(centroid["centroid_depth_km"], ".1f", " km")
-    moment_text = format_scientific(summary["M0_Nm"], " N·m")
-    magnitude_text = format_value(summary["Mw"], ".2f", " Mw")
-    dc_text = format_value(summary["DC_percent"], ".1f", "%")
-    clvd_text = format_value(summary["CLVD_percent"], ".1f", "%")
-    iso_text = (
-        format_value(summary["ISO_percent"], ".1f", "%")
-        if tensor_mode == "full" else "0.0% (constrained)"
-    )
-    vr = float(summary["variance_reduction"])
-
-    source_rows = [
-        ["Tensor", tensor_label],
-        ["Moment", moment_text],
-        ["Magnitude", magnitude_text],
-        ["Centroid depth", depth_text],
-        ["DC", dc_text],
-        ["CLVD", clvd_text],
-        ["ISO", iso_text],
-        ["Variance reduction", f"{100.0 * vr:.1f}%"],
-        ["Condition number", f"{summary['condition_number']:.2f}"],
-    ]
-
-    ax_info.text(0.0, 0.98, "Source", fontsize=12, fontweight="bold", transform=ax_info.transAxes)
-    source_table = ax_info.table(
-        cellText=source_rows, cellLoc="left", colWidths=[0.42, 0.56],
-        bbox=[0.0, 0.62, 1.0, 0.32],
-    )
-    style_table(source_table, first_col_bold=True, header=False, fontsize=9.2)
-
-    ax_info.text(
-        0.0, 0.575, "Moment Tensor Components (N·m)",
-        fontsize=11, fontweight="bold", transform=ax_info.transAxes,
-    )
-    mt_rows = [
-        ["Mrr", f"{mt_table_values[0]:.2e}", "Mtt", f"{mt_table_values[1]:.2e}", "Mpp", f"{mt_table_values[2]:.2e}"],
-        ["Mrt", f"{mt_table_values[3]:.2e}", "Mrp", f"{mt_table_values[4]:.2e}", "Mtp", f"{mt_table_values[5]:.2e}"],
-    ]
-    mt_table = ax_info.table(
-        cellText=mt_rows, cellLoc="center",
-        colWidths=[0.09, 0.23, 0.09, 0.23, 0.09, 0.23],
-        bbox=[0.0, 0.448, 1.0, 0.10],
-    )
-    mt_table.auto_set_font_size(False)
-    mt_table.set_fontsize(8.6)
-    for (row, col), cell in mt_table.get_celld().items():
-        cell.set_edgecolor("0.75")
-        cell.set_linewidth(0.5)
-        cell.visible_edges = "B"
-        if col in (0, 2, 4):
-            cell.get_text().set_fontweight("bold")
-
-    ax_info.text(0.0, 0.375, "Nodal Planes", fontsize=11, fontweight="bold", transform=ax_info.transAxes)
-    def format_angle(value):
-        return f"{float(value):.1f}°" if value is not None and np.isfinite(float(value)) else "—"
-
-    nodal_rows = [
-        ["NP1", format_angle(summary.get("NP1_strike_deg")), format_angle(summary.get("NP1_dip_deg")), format_angle(summary.get("NP1_rake_deg"))],
-        ["NP2", format_angle(summary.get("NP2_strike_deg")), format_angle(summary.get("NP2_dip_deg")), format_angle(summary.get("NP2_rake_deg"))],
-    ]
-    nodal_table = ax_info.table(
-        cellText=nodal_rows, colLabels=["Plane", "Strike", "Dip", "Rake"],
-        cellLoc="center", colLoc="center", bbox=[0.0, 0.075, 0.47, 0.265],
-    )
-    style_table(nodal_table, header=True, fontsize=8.4)
-
-    ax_info.text(0.52, 0.375, "Principal Axes", fontsize=11, fontweight="bold", transform=ax_info.transAxes)
-    axis_rows = [
-        ["T", f"{T.val:.2e}", f"{T.dip:.1f}°", f"{T.strike:.1f}°"],
-        ["N", f"{N.val:.2e}", f"{N.dip:.1f}°", f"{N.strike:.1f}°"],
-        ["P", f"{P.val:.2e}", f"{P.dip:.1f}°", f"{P.strike:.1f}°"],
-    ]
-    axes_table = ax_info.table(
-        cellText=axis_rows, colLabels=["Axis", "Value (N·m)", "Plunge", "Azimuth"],
-        cellLoc="center", colLoc="center", bbox=[0.52, 0.075, 0.48, 0.265],
-    )
-    style_table(axes_table, header=True, fontsize=8.0)
-
-    if output_file is not None:
-        output_file = Path(output_file).expanduser()
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_file, bbox_inches="tight")
-
-    if show:
-        try:
-            from IPython import get_ipython
-            from IPython.display import display
-            if get_ipython() is not None:
-                display(fig)
-            else:
-                plt.show()
-        except ImportError:
-            plt.show()
-
-    return fig
+    return _write_result_tables(results, output_dir, save_posterior_cells=save_posterior_cells)
 
 
-# Deterministic figure presets. Native uncertainty plotting is intentionally
-# disabled; optional n_uncertainty sampling remains a separate table-only diagnostic.
+
+# Historical native BayesISOLA keyword presets are retained as public workflow
+# metadata for backward compatibility. ``run_auto_cmt`` now treats ``summary`` as
+# a workflow-diagnostic preset and passes only the explicit ``full`` native preset
+# to ``BayesISOLA.plot``; the dictionaries therefore remain native-keyword only.
 PLOT_PRESETS: dict[str, dict[str, Any]] = {
     "none": dict(
         maps=False, slices=False, maps_sum=False, MT=False, uncertainty=0,
@@ -3056,6 +4691,457 @@ PLOT_PRESETS: dict[str, dict[str, Any]] = {
         covariance_function=False,
     ),
 }
+
+
+# Native BayesISOLA defaults used specifically to populate ``index.html``.
+# These mirror ``BayesISOLA.plot.__init__`` rather than any workflow preset.
+# Keeping them separate is essential: ``plot_preset="summary"`` must not trim
+# the historical HTML, and HTML-only figures must not be added to ``figure_paths``
+# or displayed by ``show=True``.
+_NATIVE_HTML_PLOT_PRESET: dict[str, Any] = dict(
+    maps=True,
+    slices=True,
+    maps_sum=True,
+    MT=True,
+    uncertainty=400,
+    seismo=False,
+    seismo_sharey=True,
+    seismo_cova=True,
+    noise=True,
+    spectra=True,
+    stations=True,
+    covariance_matrix=True,
+    covariance_function=False,
+)
+
+
+def _native_plot_kwargs(options: Mapping[str, Any], *, use_noise: bool) -> dict[str, Any]:
+    """Return native BayesISOLA plotting options safe for the covariance mode.
+
+    Parameters
+    ----------
+    options : mapping
+        Native keyword arguments accepted by :class:`BayesISOLA.plot`.
+    use_noise : bool
+        Whether the workflow estimated a noise covariance matrix. Native plots
+        that require the saved noise/covariance products are disabled when this
+        is false; all other requested native figures are preserved.
+
+    Returns
+    -------
+    dict
+        Independent copy of ``options`` suitable for ``BayesISOLA.plot``.
+    """
+    kwargs = dict(options)
+    if not use_noise:
+        kwargs.update(
+            seismo_cova=False,
+            noise=False,
+            spectra=False,
+            covariance_matrix=False,
+            covariance_function=False,
+        )
+    return kwargs
+
+
+def _render_native_outputs(
+    solution,
+    output_path: str | Path,
+    *,
+    event_id: str,
+    plot: bool,
+    plot_preset: str,
+    html_output: bool,
+    use_noise: bool,
+    detect_mouse: bool,
+):
+    """Generate native BayesISOLA plot products without coupling HTML to presets.
+
+    Workflow ``summary`` figures are handled by :mod:`BayesISOLA._diagnostics`
+    and therefore do not instantiate the historical native plot suite. Native
+    figures are generated in two cases only:
+
+    * ``plot_preset='full'`` explicitly requests the native full plot products;
+      those files are returned for normal ``figure_paths``/``show`` handling.
+    * ``html_output=True`` requests the historical ``index.html``. In this case
+      the complete native HTML figure suite is generated regardless of
+      ``plot_preset``. HTML-only figures are intentionally *not* returned for
+      notebook display.
+
+    When both cases apply, the native full workflow preset is generated once,
+    captured for normal display, and only the native uncertainty products missing
+    from that preset are added silently before ``html_log()`` is written.
+
+    Returns
+    -------
+    tuple
+        ``(plot_object, displayable_native_figures, native_html_path)``.
+    """
+    import BayesISOLA
+
+    output_path = Path(output_path).expanduser()
+    request_full = bool(plot and plot_preset == "full")
+
+    if not request_full and not html_output:
+        return None, [], None
+
+    plot_object = None
+    displayable_native_figures: list[Path] = []
+
+    if request_full:
+        before = _png_state(output_path)
+        kwargs = _native_plot_kwargs(PLOT_PRESETS["full"], use_noise=use_noise)
+        plot_object = BayesISOLA.plot(solution, **kwargs)
+        # Capture only products explicitly requested by ``plot_preset='full'``.
+        # Any additional HTML-only products generated below remain silent.
+        displayable_native_figures = _changed_pngs(output_path, before)
+
+    if html_output:
+        if plot_object is None:
+            kwargs = _native_plot_kwargs(
+                _NATIVE_HTML_PLOT_PRESET,
+                use_noise=use_noise,
+            )
+            plot_object = BayesISOLA.plot(solution, **kwargs)
+        elif not plot_object.plots.get("uncertainty"):
+            # ``PLOT_PRESETS['full']`` deliberately disables the historical
+            # uncertainty sampler because the workflow has its own diagnostics.
+            # Native HTML, however, should retain the original BayesISOLA suite.
+            plot_object.plot_uncertainty(n=int(_NATIVE_HTML_PLOT_PRESET["uncertainty"]))
+
+        plot_object.html_log(
+            h1=f"BayesISOLA CMT — {event_id}",
+            mouse_figures="mouse/" if detect_mouse else None,
+        )
+
+        candidate = output_path / "index.html"
+        if not candidate.is_file() or candidate.stat().st_size == 0:
+            raise OSError(
+                f"Native BayesISOLA HTML was not written correctly: {candidate}"
+            )
+        native_html_path = candidate
+    else:
+        native_html_path = None
+
+    return plot_object, displayable_native_figures, native_html_path
+
+
+_DIAGNOSTIC_PLOT_PRESETS: dict[str, tuple[str, ...]] = {
+    "none": (),
+    "summary": (
+        "cmt",
+        "posterior",
+        "adaptive",
+        "station_qc",
+        "uncertainty",
+        "station_fit",
+    ),
+    "full": (
+        "cmt",
+        "posterior",
+        "adaptive",
+        "station_qc",
+        "uncertainty",
+        "station_fit",
+    ),
+}
+
+
+def _save_diagnostic_figure(fig, path: str | Path, *, dpi: int = 200) -> Path:
+    """Save and close a workflow diagnostic figure, verifying the output file."""
+    if fig is None or not hasattr(fig, "savefig"):
+        raise TypeError("Diagnostic plotter did not return a Matplotlib figure.")
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import matplotlib.pyplot as plt
+    try:
+        fig.savefig(path, dpi=int(dpi), bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    if not path.is_file() or path.stat().st_size == 0:
+        raise OSError(f"Diagnostic figure was not written correctly: {path}")
+    return path
+
+
+def _write_diagnostic_preset(
+    run: Mapping[str, Any],
+    preset: str,
+    output_dir: str | Path,
+    *,
+    tensor_mode: str,
+    dpi: int = 200,
+) -> list[Path]:
+    """Write the workflow-level figures associated with a plot preset.
+
+    This helper intentionally operates on the completed public ``run`` mapping,
+    exactly like the standalone functions in :mod:`BayesISOLA._diagnostics`.
+    Keeping this layer separate from ``PLOT_PRESETS`` prevents diagnostic-only
+    keywords from leaking into the native ``BayesISOLA.plot`` constructor.
+
+    Parameters
+    ----------
+    run : mapping
+        Completed or nearly completed ``run_auto_cmt`` mapping containing
+        ``results``, ``adaptive_history`` and ``station_selection``.
+    preset : {"none", "summary", "full"}
+        Workflow plotting preset. ``summary`` and ``full`` currently write the
+        same curated diagnostic set; native BayesISOLA plots remain different.
+    output_dir : str or pathlib.Path
+        Directory receiving diagnostic PNG files.
+    tensor_mode : {"full", "deviatoric"}
+        Inversion tensor type passed to :func:`plot_cmt_summary`.
+    dpi : int, default=200
+        Saved figure resolution.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Diagnostic files actually generated. Optional figures are omitted when
+        their source data are unavailable (for example uncertainty samples).
+    """
+    preset = str(preset).lower().strip()
+    if preset not in _DIAGNOSTIC_PLOT_PRESETS:
+        raise ValueError(
+            f"preset must be one of {tuple(_DIAGNOSTIC_PLOT_PRESETS)}."
+        )
+    tensor_mode = str(tensor_mode).lower().strip()
+    if tensor_mode not in {"full", "deviatoric"}:
+        raise ValueError("tensor_mode must be 'full' or 'deviatoric'.")
+    if not isinstance(run, Mapping):
+        raise TypeError("run must be the mapping returned by run_auto_cmt.")
+    results = run.get("results")
+    if not isinstance(results, Mapping):
+        raise TypeError("run['results'] must be a mapping.")
+
+    output_dir = Path(output_dir).expanduser()
+    names = _DIAGNOSTIC_PLOT_PRESETS[preset]
+    if not names:
+        return []
+
+    paths: list[Path] = []
+
+    def save(name: str, fig) -> None:
+        paths.append(_save_diagnostic_figure(fig, output_dir / name, dpi=dpi))
+
+    if "cmt" in names:
+        save(
+            "cmt_summary.png",
+            plot_cmt_summary(
+                results["summary"], results["centroid"],
+                tensor_mode=tensor_mode, show=False,
+            ),
+        )
+    if "posterior" in names:
+        save("posterior_summary.png", plot_posterior_summary(run))
+
+    adaptive_history = run.get("adaptive_history")
+    if (
+        "adaptive" in names
+        and isinstance(adaptive_history, pd.DataFrame)
+        and not adaptive_history.empty
+    ):
+        save("adaptive_grid_summary.png", plot_adaptive_history(run))
+
+    station_selection = run.get("station_selection")
+    if (
+        "station_qc" in names
+        and isinstance(station_selection, pd.DataFrame)
+        and not station_selection.empty
+    ):
+        save("station_qc_summary.png", plot_station_qc(run))
+
+    uncertainty = results.get("uncertainty")
+    if (
+        "uncertainty" in names
+        and isinstance(uncertainty, pd.DataFrame)
+        and not uncertainty.empty
+    ):
+        save("uncertainty_summary.png", plot_uncertainty_summary(run))
+
+    if "station_fit" in names:
+        save("station_fit_summary.png", plot_station_fit_summary(run, show=False))
+
+    return paths
+
+
+def _adaptive_stage_record(
+    stage_index: int,
+    stage_type: str,
+    grid,
+    solution,
+    proposal: Mapping[str, Any] | None = None,
+    posterior_diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return one compact row describing an adaptive inversion stage."""
+    report = diagnose_grid_edge(grid, centroid=solution.centroid)
+    depths = sorted({float(gp["z"]) / 1000.0 for gp in grid.grid if not gp.get("err")})
+    row = {
+        "stage_index": int(stage_index),
+        "stage_type": str(stage_type),
+        "n_grid_points": int(len(grid.grid)),
+        "radius_km": float(grid.radius) / 1000.0,
+        "step_x_km": float(grid.step_x) / 1000.0,
+        "step_z_km": float(grid.step_z) / 1000.0,
+        "depth_min_km": depths[0] if depths else np.nan,
+        "depth_max_km": depths[-1] if depths else np.nan,
+        "centroid_north_km": float(solution.centroid["x"]) / 1000.0,
+        "centroid_east_km": float(solution.centroid["y"]) / 1000.0,
+        "centroid_depth_km": float(solution.centroid["z"]) / 1000.0,
+        "centroid_time_shift_s": float(solution.centroid["shift"]),
+        "variance_reduction": float(solution.centroid["VR"]),
+        "condition_number": float(solution.centroid["CN"]),
+        "horizontal_search_fixed": bool(report["horizontal_search_fixed"]),
+        "on_horizontal_boundary": bool(report.get("centroid_on_horizontal_boundary", False)),
+        "on_depth_floor": bool(report.get("centroid_on_depth_floor", False)),
+        "on_depth_ceiling": bool(report.get("centroid_on_depth_ceiling", False)),
+        "on_active_spatial_boundary": bool(report.get("centroid_on_active_spatial_boundary", False)),
+        "centroid_edge_reasons": report.get("centroid_edge_reasons", []),
+    }
+    if posterior_diagnostics is not None:
+        row.update({
+            "posterior_mode_probability": posterior_diagnostics.get("posterior_mode_probability"),
+            "posterior_effective_cells": posterior_diagnostics.get("posterior_effective_cells"),
+            "posterior_horizontal_boundary_probability": posterior_diagnostics.get("posterior_horizontal_boundary_probability"),
+            "posterior_depth_floor_probability": posterior_diagnostics.get("posterior_depth_floor_probability"),
+            "posterior_depth_ceiling_probability": posterior_diagnostics.get("posterior_depth_ceiling_probability"),
+            "posterior_active_spatial_boundary_probability": posterior_diagnostics.get("posterior_active_spatial_boundary_probability"),
+            "uncertainty_variance_scale": posterior_diagnostics.get("uncertainty_variance_scale"),
+            "uncertainty_sd_scale": posterior_diagnostics.get("uncertainty_sd_scale"),
+            "reduced_chi_square": posterior_diagnostics.get("reduced_chi_square"),
+        })
+    if proposal is not None:
+        row["applied_proposal_reason"] = proposal.get("reason")
+        row["applied_grid_points_estimate"] = proposal.get("estimated_grid_points")
+    return row
+
+
+def _set_fixed_adaptive_time_window(data, grid, processing_depth_max_km: float | None) -> None:
+    """Keep waveform/GF time support invariant across adaptive stages.
+
+    BayesISOLA derives ``t_max`` from ``grid.depth_max``. A refinement that
+    narrows the searched depth interval would otherwise shorten the data vector,
+    Green-function duration and noise covariance, so different adaptive stages
+    would no longer evaluate the same likelihood. Temporarily exposing the
+    maximum admissible adaptive depth to ``set_time_window`` preserves the search
+    grid while fixing the inversion time support.
+    """
+    if processing_depth_max_km is None:
+        return
+    processing_depth_max_m = float(processing_depth_max_km) * 1000.0
+    if not np.isfinite(processing_depth_max_m) or processing_depth_max_m <= 0:
+        raise ValueError("processing_depth_max_km must be positive and finite or None.")
+    search_depth_max = float(grid.depth_max)
+    grid.depth_max = max(search_depth_max, processing_depth_max_m)
+    try:
+        data.set_time_window()
+        data.set_Greens_parameters()
+    finally:
+        grid.depth_max = search_depth_max
+
+
+def _run_adaptive_axitra_stage(
+    *,
+    inputs,
+    radius_km: float,
+    depth_min_km: float,
+    depth_max_km: float,
+    step_x_km: float,
+    step_z_km: float,
+    max_grid_points: int,
+    time_unc_s: float,
+    rupture_velocity_m_s: float,
+    velocity_slowest_m_s: float,
+    freqmin: float,
+    freqmax: float,
+    threads: int,
+    progress: bool,
+    invert_displacement: bool,
+    use_precalculated_Green: bool | str,
+    use_noise: bool,
+    crosscovariance: bool,
+    deviatoric: bool,
+    normalized_gf_options: Mapping[str, Any],
+    processing_depth_max_km: float | None = None,
+    save_non_inverted_covariance: bool = False,
+    store_station_normal_equations: bool = False,
+) -> tuple[Any, Any, Any, Any, bool]:
+    """Rerun Axitra on an explicit adaptive grid without reacquiring waveforms.
+
+    ``inputs.data_raw`` already contains response-corrected waveforms after the
+    first stage, so ``correct_data=False`` is essential here.  A changed grid
+    invalidates native Axitra's whole-grid cache metadata; ``'auto'`` therefore
+    regenerates the required Green functions.  The 0.2 adaptive search intentionally
+    does not attempt partial GF reuse across differently indexed grids.
+    """
+    import BayesISOLA
+
+    event_depth_km = float(inputs.event["depth"]) / 1000.0
+    depth_unc_km = max(abs(event_depth_km - float(depth_min_km)),
+                       abs(float(depth_max_km) - event_depth_km))
+    grid = BayesISOLA.grid(
+        inputs,
+        location_unc=0.0,
+        depth_unc=depth_unc_km * 1000.0,
+        time_unc=float(time_unc_s),
+        step_x=float(step_x_km) * 1000.0,
+        step_z=float(step_z_km) * 1000.0,
+        max_points=int(max_grid_points),
+        grid_radius=float(radius_km) * 1000.0 if float(radius_km) > 0 else 0.0,
+        grid_min_depth=float(depth_min_km) * 1000.0,
+        grid_max_depth=float(depth_max_km) * 1000.0,
+        circle_shape=True,
+        add_rupture_length=False,
+        rupture_velocity=float(rupture_velocity_m_s),
+    )
+
+    data = BayesISOLA.process_data(
+        inputs,
+        grid,
+        threads=int(threads),
+        progress=bool(progress),
+        invert_displacement=bool(invert_displacement),
+        use_precalculated_Green=use_precalculated_Green,
+        velocity_ot_the_slowest_wave=float(velocity_slowest_m_s),
+        fmax=float(freqmax),
+        fmin=float(freqmin),
+        min_depth=float(depth_min_km) * 1000.0,
+        correct_data=False,
+        calculate_or_verify_Green=False,
+        trim_filter_data=False,
+        decimate_shift=False,
+    )
+    _set_fixed_adaptive_time_window(data, grid, processing_depth_max_km)
+
+    if normalized_gf_options["grid"] is None:
+        before_green = _axitra_green_state(data)
+        data.calculate_or_verify_Green()
+        after_green = _axitra_green_state(data)
+        reused = bool(use_precalculated_Green is not False and before_green and before_green == after_green)
+    else:
+        reused = _calculate_or_verify_axitra_multimodel(data, use_precalculated_Green)
+
+    data.trim_filter_data(noise_slice=use_noise)
+    data.decimate_shift()
+
+    # Retain small station-wise normal equations while G is already in memory
+    # when the exact fixed-grid jackknife has been requested.
+    data._store_station_normal_equations = bool(store_station_normal_equations)
+
+    cova = BayesISOLA.covariance_matrix(data)
+    if use_noise:
+        cova.covariance_matrix_noise(
+            crosscovariance=bool(crosscovariance),
+            save_non_inverted=bool(save_non_inverted_covariance),
+            save_covariance_function=False,
+        )
+
+    solution = BayesISOLA.resolve_MT(
+        data,
+        cova,
+        deviatoric=bool(deviatoric),
+        VR_of_components=True,
+    )
+    return grid, data, cova, solution, reused
 
 
 def run_auto_cmt(
@@ -3080,7 +5166,7 @@ def run_auto_cmt(
     radius_scale_factor: float = 1.66,
     ground_level: bool = True,
     channels: Sequence[str] = ("HH?", "BH?", "LH?"),
-    channel_priority: Sequence[str] = ("HH", "BH", "LH"),
+    channel_priority: ChannelPriority = ("HH", "BH", "LH"),
     taup_model: str = "iasp91",
     overwrite_waveforms: bool = False,
     location_unc_km: float = 0.0,
@@ -3088,11 +5174,18 @@ def run_auto_cmt(
     min_depth_km: float = 5.0,
     min_depth_multiplier: float = 0.5,
     max_depth_multiplier: float = 3.0,
+    grid_radius_km: float | None = None,
+    grid_min_depth_km: float | None = None,
+    grid_max_depth_km: float | None = None,
     step_x_km: float = 2.0,
     step_z_km: float = 1.0,
     max_grid_points: int = 5000,
     add_rupture_length: bool = True,
     rupture_velocity_m_s: float = 1000.0,
+    adaptive_grid_search: bool | Mapping[str, Any] | None = None,
+    drop_stations: Sequence[str] | str | None = None,
+    azimuth_control: bool | Mapping[str, Any] | None = None,
+    station_jackknife: bool | Mapping[str, Any] | None = None,
     velocity_slowest_m_s: float = 1000.0,
     noise_factor: float = 4.0,
     edge_margin_s: float = 1.0,
@@ -3107,9 +5200,15 @@ def run_auto_cmt(
     deviatoric: bool = False,
     detect_mouse: bool = True,
     n_uncertainty: int | None = None,
+    uncertainty_scale: str | float = "fixed",
+    uncertainty_scale_floor: float = 1.0,
+    uncertainty_random_state: int | None = None,
+    save_posterior_cells: bool = False,
     plot: bool = True,
     plot_preset: str = "summary",
     show: bool = True,
+    html_output: bool = True,
+    write_report: bool = False,
     profile_crs: str = "EPSG:4326",
     velocity_depth_col: str = "Depth_km",
     vp_col: str = "Vp",
@@ -3192,9 +5291,12 @@ def run_auto_cmt(
 
     Progress reporting
     ------------------
-    ``progress`` controls the native BayesISOLA progress bars used for Axitra
-    Green's-function calculation and moment-tensor inversion.  Syngine retains
-    its backend-specific ``gf_options['progress']`` control.
+    ``progress`` controls the native BayesISOLA progress indicators used for
+    Axitra Green's-function calculation and moment-tensor inversion.  The 0.2
+    station jackknife uses cached station-wise normal-equation contributions and
+    is intentionally not given a separate progress bar because it no longer
+    performs a second Green-function/filtering pass. Syngine retains its
+    backend-specific ``gf_options['progress']`` control.
 
     Station radius and waveforms
     ----------------------------
@@ -3208,11 +5310,28 @@ def run_auto_cmt(
 
     Depth grid
     ----------
-    The shallow grid bound is
+    By default the shallow grid bound is
     ``max(min_depth_km, event_depth_km * min_depth_multiplier)`` and the deep
-    bound is ``event_depth_km * max_depth_multiplier``. ``max_grid_points`` is
-    BayesISOLA's approximate pre-construction rescaling target; the realised
-    discrete grid remains authoritative.
+    bound is ``event_depth_km * max_depth_multiplier``. ``grid_radius_km``,
+    ``grid_min_depth_km`` and ``grid_max_depth_km`` expose the native explicit
+    BayesISOLA grid controls; ``None`` preserves the 0.1.1 automatic behaviour.
+    ``max_grid_points`` is BayesISOLA's approximate pre-construction rescaling
+    target; the realised discrete grid remains authoritative.
+
+    ``adaptive_grid_search=None`` preserves the non-adaptive behaviour. Passing a
+    mapping enables the bounded Axitra adaptive search and keeps the public wrapper to
+    one option. Unspecified mapping values use the documented 0.2 defaults, e.g.::
+
+        adaptive_grid_search={
+            "adaptive_grid": True,
+            "adaptive_max_grid_points": 20000,
+        }
+
+    A genuine spatial boundary is expanded symmetrically about the catalogue
+    epicentre before any refinement. ``adaptive_refine_factor=0`` skips the
+    refinement stage while still allowing boundary expansion. Adaptive stages use
+    one fixed waveform/GF time support so narrowing a refinement depth window does
+    not silently change the likelihood.
 
     Waveform window and covariance
     ------------------------------
@@ -3223,23 +5342,74 @@ def run_auto_cmt(
     unweighted ordinary least-squares branch. ``velocity_slowest_m_s`` is passed
     to ``process_data`` so acquisition and BayesISOLA use the same timing bound.
 
+    Station controls and robustness
+    -------------------------------
+    ``drop_stations`` is an explicit manual station exclusion list applied before
+    any azimuthal thinning. ``azimuth_control=None``/``False`` leaves all retained
+    stations untouched, ``True`` uses eight 45-degree GISOLA-style sectors with
+    three occupied sectors and at most two stations per sector, and a mapping can
+    override those defaults. Within each sector BayesISOLA honors
+    ``channel_priority`` first and distance second. ``channel_priority`` may remain
+    the historical sequence, e.g. ``('HH', 'BH', 'LH')``, or use station-specific
+    magnitude/distance precedence rules, for example::
+
+        channels=("HH?", "BH?", "LH?"),
+        channel_priority={
+            "mag_range": [[4.0, 5.0], [5.0, 6.0]],
+            "dist_range": [[10, 250], [40, 300]],
+            "channels": [["BH", "HH"], ["HN", "BN"]],
+        }
+
+    The rule intervals are ``[min, max)``; the first matching rule wins. Families
+    not listed in a matching rule remain fallbacks in the default order inferred
+    from ``channels`` (or supplied explicitly with ``default``). Rule-only families
+    such as ``HN``/``BN`` above are automatically added to the FDSN metadata query.
+
+    ``station_jackknife=True`` evaluates every active station omission on the final
+    converged full-solution grid. A mapping currently exposes only
+    ``jackknife_min_stations`` (default 4). The jackknife reuses existing Green
+    functions and station-block normal equations; it never triggers an adaptive
+    expansion/refinement, even when a leave-one-out mode lies on the grid boundary.
+    Cached station-wise normal equations make this final-grid robustness scan
+    inexpensive and avoid any second Green-function read/filter pass.
+
     Outputs and uncertainty
     -----------------------
-    Deterministic centroid, moment-tensor summary, station/component fit and
-    grid-edge tables are always written. ``n_uncertainty`` remains available for
-    the native BayesISOLA posterior sampler and is returned/written separately
-    when requested, but uncertainty-derived ``±`` values are deliberately not
-    mixed into :func:`plot_cmt_summary` in version 0.1.7. Native uncertainty plots
-    also remain disabled in all helper plot presets. ``plot=True`` saves figures;
-    ``plot_preset`` is ``'none'``, ``'summary'`` or ``'full'``; ``show=True``
-    additionally displays saved figures in the notebook.
+    Deterministic centroid, moment-tensor summary, station/component fit, exact
+    posterior diagnostics and grid-edge tables are always written. If
+    ``n_uncertainty`` is requested, the 0.2 workflow draws nonlinear cells
+    categorically and then samples the selected cell's conditional Gaussian MT.
+    ``uncertainty_scale='fixed'`` preserves the native covariance scale, whereas
+    ``'residual'`` applies the preferred-cell reduced-chi-square scale to the
+    nonlinear likelihood and conditional MT covariance. This is a scalar residual
+    calibration, not a substitute for structural/theory covariance. Native
+    BayesISOLA uncertainty plotting remains disabled in the workflow-facing
+    ``PLOT_PRESETS``; the workflow-level uncertainty diagnostic is generated when
+    uncertainty samples exist. ``plot=True`` saves figures and ``plot_preset`` is
+    ``'none'``, ``'summary'`` or ``'full'``. ``summary`` writes the curated CMT,
+    exact-posterior, adaptive-history, station-QC, uncertainty (when sampled), and
+    station-fit diagnostics from :mod:`BayesISOLA._diagnostics`; it does not request
+    the historical native plot suite. ``full`` additionally requests BayesISOLA's
+    native full plotting preset. ``show=True`` displays only these workflow-requested
+    products.
+
+    ``html_output=True`` is independent of ``plot_preset`` and writes the historical
+    native BayesISOLA ``index.html`` using the complete native HTML figure suite.
+    Those HTML-supporting figures are written to disk because ``html_log()`` needs
+    them, but they are not added to ``run['figure_paths']`` and are therefore not
+    displayed merely because ``show=True``. If ``plot_preset='full'`` explicitly
+    requests the same native products, that request still controls their normal
+    display/export semantics. ``write_report=True`` independently writes the curated
+    workflow-level ``report.html`` from the completed ``run`` mapping.
 
     Returns
     -------
     dict
         Native BayesISOLA objects plus acquisition diagnostics, ``run['gf']``
         backend metadata, crust/model information where applicable, curated
-        ``run['results']`` tables, result paths and figure paths.
+        ``run['results']`` tables, result/figure paths, ``native_html_path``
+        when the historical HTML renderer is enabled, and ``report_path`` when
+        the curated workflow report is requested.
     """
     import BayesISOLA
 
@@ -3255,12 +5425,67 @@ def run_auto_cmt(
         raise ValueError("covariance must be 'none' or 'noise'.")
     if plot_preset not in PLOT_PRESETS:
         raise ValueError(f"plot_preset must be one of {tuple(PLOT_PRESETS)}.")
+    _normalize_channel_priority(channel_priority, channels)
+    for option_name, option_value in (("html_output", html_output), ("write_report", write_report)):
+        if not isinstance(option_value, (bool, np.bool_)):
+            raise TypeError(f"{option_name} must be True or False.")
+    html_output = bool(html_output)
+    write_report = bool(write_report)
     if float(freqmin) < 0 or float(freqmax) <= float(freqmin):
         raise ValueError("Require 0 <= freqmin < freqmax.")
     if waveform_source == "local" and station_df is None:
         raise ValueError("waveform_source='local' requires station_df from get_mseed_stationxml or an equivalent local-file table.")
     if use_precalculated_Green not in {False, True, "auto"}:
         raise ValueError("use_precalculated_Green must be False, True or 'auto'.")
+    if grid_radius_km is not None and (not np.isfinite(float(grid_radius_km)) or float(grid_radius_km) < 0):
+        raise ValueError("grid_radius_km must be None or a finite value >= 0.")
+    if int(max_grid_points) <= 0:
+        raise ValueError("max_grid_points must be positive.")
+    adaptive_config = _normalize_adaptive_grid_search(adaptive_grid_search)
+    azimuth_config = _normalize_azimuth_control(azimuth_control)
+    jackknife_config = _normalize_station_jackknife(station_jackknife)
+    adaptive_grid = bool(adaptive_config["adaptive_grid"])
+    adaptive_expand_xy_steps = int(adaptive_config["adaptive_expand_xy_steps"])
+    adaptive_expand_z_steps = int(adaptive_config["adaptive_expand_z_steps"])
+    adaptive_max_expansions = int(adaptive_config["adaptive_max_expansions"])
+    adaptive_max_refinements = int(adaptive_config["adaptive_max_refinements"])
+    adaptive_refine_factor = float(adaptive_config["adaptive_refine_factor"])
+    adaptive_min_step_fraction = float(adaptive_config["adaptive_min_step_fraction"])
+    adaptive_depth_window_parent_steps = adaptive_config["adaptive_depth_window_parent_steps"]
+    adaptive_max_radius_factor = float(adaptive_config["adaptive_max_radius_factor"])
+    adaptive_max_depth_span_factor = float(adaptive_config["adaptive_max_depth_span_factor"])
+    adaptive_max_grid_points = adaptive_config["adaptive_max_grid_points"]
+    adaptive_max_total_reruns = int(adaptive_config["adaptive_max_total_reruns"])
+    adaptive_expand_on_posterior_boundary = bool(
+        adaptive_config["adaptive_expand_on_posterior_boundary"]
+    )
+    adaptive_boundary_probability_threshold = float(
+        adaptive_config["adaptive_boundary_probability_threshold"]
+    )
+
+    if adaptive_grid and gf_source != "axitra":
+        raise NotImplementedError("The 0.2 adaptive-grid search currently supports gf_source='axitra' only.")
+    if adaptive_grid and use_precalculated_Green is True:
+        raise ValueError("adaptive_grid_search requires use_precalculated_Green='auto' or False because a changed grid needs new Green functions.")
+    adaptive_grid_point_budget = (
+        None if adaptive_max_grid_points is None else int(adaptive_max_grid_points)
+    )
+
+    base_grid_min_depth_km, base_grid_max_depth_km = _depth_bounds_km(
+        float(event_depth_km),
+        min_depth_km=float(min_depth_km),
+        min_depth_multiplier=float(min_depth_multiplier),
+        max_depth_multiplier=float(max_depth_multiplier),
+        grid_min_depth_km=grid_min_depth_km,
+        grid_max_depth_km=grid_max_depth_km,
+    )
+    acquisition_grid_min_depth_km = base_grid_min_depth_km
+    acquisition_grid_max_depth_km = base_grid_max_depth_km
+    if adaptive_grid and float(adaptive_max_depth_span_factor) > 1.0:
+        base_span = base_grid_max_depth_km - base_grid_min_depth_km
+        extra_span = (float(adaptive_max_depth_span_factor) - 1.0) * base_span
+        acquisition_grid_min_depth_km = max(float(min_depth_km), base_grid_min_depth_km - extra_span)
+        acquisition_grid_max_depth_km = base_grid_max_depth_km + extra_span
 
     resolved_max_radius_km = _resolve_max_radius_km(float(magnitude), max_radius_km, radius_scale_factor)
     output_path = Path(output_dir).expanduser()
@@ -3294,7 +5519,9 @@ def run_auto_cmt(
             channels=channels, channel_priority=channel_priority,
             taup_model=taup_model, min_depth_km=min_depth_km,
             min_depth_multiplier=min_depth_multiplier,
-            max_depth_multiplier=max_depth_multiplier, time_unc_s=time_unc_s,
+            max_depth_multiplier=max_depth_multiplier,
+            grid_min_depth_km=acquisition_grid_min_depth_km,
+            grid_max_depth_km=acquisition_grid_max_depth_km, time_unc_s=time_unc_s,
             rupture_velocity_m_s=rupture_velocity_m_s,
             velocity_slowest_m_s=velocity_slowest_m_s, covariance=covariance,
             noise_factor=noise_factor, edge_margin_s=edge_margin_s,
@@ -3313,6 +5540,19 @@ def run_auto_cmt(
             "radius_scale_factor": float(radius_scale_factor),
             "ground_level": bool(ground_level),
         }])
+
+    stations, station_selection = _apply_station_controls(
+        stations,
+        drop_stations=drop_stations,
+        azimuth_config=azimuth_config,
+        channel_priority=channel_priority,
+        channels=channels,
+        magnitude=float(magnitude),
+        event_lat=float(event_lat),
+        event_lon=float(event_lon),
+    )
+    station_selection_path = metadata_path / "station_selection.csv"
+    station_selection.to_csv(station_selection_path, index=False)
 
     crust_profile = None
     crust_layers = None
@@ -3355,28 +5595,38 @@ def run_auto_cmt(
 
     # BayesISOLA determines model filenames from the station-model tags populated
     # by read_network_coordinates, so crust copying must occur after the network
-    # has been read. The 0.1.6 ordering copied before those model keys existed.
+    # has been read. Earlier workflow ordering copied the crust before those
+    # model keys existed.
     if gf_source == "axitra":
         inputs.read_crust(str(case_crust_file))
 
-    grid_radius_km = float(location_unc_km) + (
+    automatic_grid_radius_km = float(location_unc_km) + (
         inputs.rupture_length / 1000.0 if add_rupture_length else 0.0
+    )
+    resolved_grid_radius_km = (
+        automatic_grid_radius_km if grid_radius_km is None else float(grid_radius_km)
     )
     depth_spec = suggest_depth_limits(
         float(event_depth_km), min_depth_km=float(min_depth_km),
         min_depth_multiplier=float(min_depth_multiplier),
         max_depth_multiplier=float(max_depth_multiplier),
+        grid_min_depth_km=base_grid_min_depth_km,
+        grid_max_depth_km=base_grid_max_depth_km,
         step_z_km=float(step_z_km), step_x_km=float(step_x_km),
-        radius_km=grid_radius_km, max_points=int(max_grid_points),
+        radius_km=resolved_grid_radius_km, max_points=int(max_grid_points),
     )
+    explicit_radius = grid_radius_km is not None
     grid = BayesISOLA.grid(
-        inputs, location_unc=float(location_unc_km) * 1000.0,
+        inputs,
+        location_unc=0.0 if explicit_radius else float(location_unc_km) * 1000.0,
         depth_unc=depth_spec["depth_unc_km"] * 1000.0,
         time_unc=float(time_unc_s), step_x=float(step_x_km) * 1000.0,
         step_z=float(step_z_km) * 1000.0, max_points=int(max_grid_points),
+        grid_radius=resolved_grid_radius_km * 1000.0 if explicit_radius and resolved_grid_radius_km > 0 else 0.0,
         grid_min_depth=depth_spec["grid_min_depth_km"] * 1000.0,
         grid_max_depth=depth_spec["grid_max_depth_km"] * 1000.0,
-        circle_shape=True, add_rupture_length=bool(add_rupture_length),
+        circle_shape=True,
+        add_rupture_length=False if explicit_radius else bool(add_rupture_length),
         rupture_velocity=float(rupture_velocity_m_s),
     )
 
@@ -3384,7 +5634,9 @@ def run_auto_cmt(
         float(event_depth_km), float(magnitude), station_df=stations,
         radius_scale_factor=radius_scale_factor, min_depth_km=min_depth_km,
         min_depth_multiplier=min_depth_multiplier,
-        max_depth_multiplier=max_depth_multiplier, time_unc_s=time_unc_s,
+        max_depth_multiplier=max_depth_multiplier,
+        grid_min_depth_km=acquisition_grid_min_depth_km,
+        grid_max_depth_km=acquisition_grid_max_depth_km, time_unc_s=time_unc_s,
         rupture_velocity_m_s=rupture_velocity_m_s,
         velocity_slowest_m_s=velocity_slowest_m_s, covariance=covariance,
         noise_factor=noise_factor, edge_margin_s=edge_margin_s,
@@ -3394,6 +5646,7 @@ def run_auto_cmt(
         inputs, stations, t_before=waveform_window["t_before_s"],
         t_after=waveform_window["t_after_s"],
     )
+    _validate_selected_azimuth_geometry(loaded_stations, azimuth_config)
     write_network_file(loaded_stations, network_path)
     loaded_stations.to_csv(metadata_path / "stations_loaded.csv", index=False)
     load_log.to_csv(metadata_path / "load_log.csv", index=False)
@@ -3427,7 +5680,13 @@ def run_auto_cmt(
             )
         )
 
-    mouse_figures = output_path / "mouse" if plot and plot_preset == "full" else False
+    # Mouse diagnostics belong to the native HTML/full-native suite, not to the
+    # workflow summary preset. Generate them whenever either consumer needs them.
+    mouse_figures = (
+        output_path / "mouse"
+        if detect_mouse and (html_output or (plot and plot_preset == "full"))
+        else False
+    )
     if detect_mouse:
         inputs.detect_mouse(figures=mouse_figures)
 
@@ -3442,6 +5701,8 @@ def run_auto_cmt(
         calculate_or_verify_Green=False,
         trim_filter_data=False, decimate_shift=False,
     )
+    if adaptive_grid:
+        _set_fixed_adaptive_time_window(data, grid, acquisition_grid_max_depth_km)
 
     if gf_source == "axitra":
         if normalized_gf_options["grid"] is None:
@@ -3482,61 +5743,240 @@ def run_auto_cmt(
             )
         )
 
+    # Piggyback exact station-jackknife sufficient statistics on the inversion
+    # pass, avoiding a second read/filter pass through every elementary seismogram.
+    data._store_station_normal_equations = bool(jackknife_config["enabled"])
+
     cova = BayesISOLA.covariance_matrix(data)
     if use_noise:
         cova.covariance_matrix_noise(
             crosscovariance=bool(crosscovariance),
-            save_non_inverted=bool(plot and plot_preset == "full"),
+            # Native covariance-matrix plotting requires the non-inverted
+            # covariance blocks to be retained. HTML generation must therefore
+            # request them independently of the workflow plot preset.
+            save_non_inverted=bool(html_output or (plot and plot_preset == "full")),
             save_covariance_function=False,
         )
 
     solution = BayesISOLA.resolve_MT(
         data, cova, deviatoric=bool(deviatoric), VR_of_components=True
     )
+
+    initial_depths = sorted({float(gp["z"]) / 1000.0 for gp in grid.grid if not gp.get("err")})
+    initial_radius_km = float(grid.radius) / 1000.0
+    initial_step_x_km = float(grid.step_x) / 1000.0
+    initial_step_z_km = float(grid.step_z) / 1000.0
+    initial_depth_min_km = initial_depths[0]
+    initial_depth_max_km = initial_depths[-1]
+    def adaptive_stage_posterior(current_solution):
+        stage_scale, stage_scale_diag = _resolve_uncertainty_variance_scale(
+            current_solution, uncertainty_scale, minimum_scale=float(uncertainty_scale_floor)
+        )
+        stage_cells = build_posterior_cells(current_solution, variance_scale=stage_scale)
+        stage_diag = compute_posterior_diagnostics(
+            current_solution, stage_cells, variance_scale_diagnostics=stage_scale_diag
+        )
+        return stage_diag
+
+    adaptive_stage_diag = adaptive_stage_posterior(solution) if adaptive_grid else {}
+    adaptive_history_rows = [_adaptive_stage_record(
+        0, "initial", grid, solution,
+        posterior_diagnostics=adaptive_stage_diag if adaptive_grid else None,
+    )]
+    expansion_count = 0
+    refinement_count = 0
+
+    if adaptive_grid:
+        while True:
+            edge_report_now = diagnose_grid_edge(grid, centroid=solution.centroid)
+            centroid_boundary = bool(edge_report_now.get("centroid_on_active_spatial_boundary", False))
+            posterior_boundary_probabilities = [
+                adaptive_stage_diag.get("posterior_horizontal_boundary_probability", np.nan),
+                adaptive_stage_diag.get("posterior_depth_floor_probability", np.nan),
+                adaptive_stage_diag.get("posterior_depth_ceiling_probability", np.nan),
+            ]
+            posterior_boundary_active = bool(adaptive_expand_on_posterior_boundary) and any(
+                np.isfinite(value)
+                and float(value) >= float(adaptive_boundary_probability_threshold)
+                for value in posterior_boundary_probabilities
+            )
+            active_boundary = centroid_boundary or posterior_boundary_active
+            decision_posterior_diagnostics = (
+                adaptive_stage_diag if adaptive_expand_on_posterior_boundary else None
+            )
+            total_reruns = expansion_count + refinement_count
+            if total_reruns >= int(adaptive_max_total_reruns):
+                adaptive_history_rows[-1]["next_action"] = "stop_max_total_reruns"
+                break
+
+            if active_boundary:
+                if expansion_count >= int(adaptive_max_expansions):
+                    adaptive_history_rows[-1]["next_action"] = "stop_max_expansions"
+                    break
+                proposal = compute_grid_expansion(
+                    grid,
+                    solution.centroid,
+                    initial_radius_km=initial_radius_km,
+                    initial_depth_min_km=initial_depth_min_km,
+                    initial_depth_max_km=initial_depth_max_km,
+                    expand_xy_steps=int(adaptive_expand_xy_steps),
+                    expand_z_steps=int(adaptive_expand_z_steps),
+                    max_radius_factor=float(adaptive_max_radius_factor),
+                    max_depth_span_factor=float(adaptive_max_depth_span_factor),
+                    min_depth_km=float(min_depth_km),
+                    grid_point_budget=adaptive_grid_point_budget,
+                    posterior_diagnostics=decision_posterior_diagnostics,
+                    boundary_probability_threshold=float(adaptive_boundary_probability_threshold),
+                )
+                adaptive_history_rows[-1]["next_action"] = "expand" if proposal.get("apply") else proposal.get("reason")
+                adaptive_history_rows[-1]["next_proposal_reason"] = proposal.get("reason")
+                adaptive_history_rows[-1]["estimated_next_grid_points"] = proposal.get("estimated_grid_points")
+                if not proposal.get("apply"):
+                    break
+
+                grid, data, cova, solution, stage_reused = _run_adaptive_axitra_stage(
+                    inputs=inputs,
+                    radius_km=proposal["grid_radius_km"],
+                    depth_min_km=proposal["grid_min_depth_km"],
+                    depth_max_km=proposal["grid_max_depth_km"],
+                    step_x_km=proposal["step_x_km"],
+                    step_z_km=proposal["step_z_km"],
+                    max_grid_points=max(int(max_grid_points), int(proposal["max_grid_points_required"])),
+                    time_unc_s=float(time_unc_s),
+                    rupture_velocity_m_s=float(rupture_velocity_m_s),
+                    velocity_slowest_m_s=float(velocity_slowest_m_s),
+                    freqmin=float(freqmin),
+                    freqmax=float(freqmax),
+                    threads=int(threads),
+                    progress=bool(progress),
+                    invert_displacement=bool(invert_displacement),
+                    use_precalculated_Green=use_precalculated_Green,
+                    use_noise=use_noise,
+                    crosscovariance=bool(crosscovariance),
+                    deviatoric=bool(deviatoric),
+                    normalized_gf_options=normalized_gf_options,
+                    processing_depth_max_km=acquisition_grid_max_depth_km,
+                    save_non_inverted_covariance=bool(
+                        html_output or (plot and plot_preset == "full")
+                    ),
+                    store_station_normal_equations=bool(jackknife_config["enabled"]),
+                )
+                expansion_count += 1
+                adaptive_stage_diag = adaptive_stage_posterior(solution)
+                adaptive_history_rows.append(
+                    _adaptive_stage_record(
+                        len(adaptive_history_rows), "expansion", grid, solution, proposal,
+                        posterior_diagnostics=adaptive_stage_diag,
+                    )
+                )
+                gf_info["reused"] = bool(stage_reused)
+                continue
+
+            if refinement_count >= int(adaptive_max_refinements):
+                adaptive_history_rows[-1]["next_action"] = "accept"
+                break
+
+            proposal = compute_grid_refinement(
+                grid,
+                solution.centroid,
+                initial_step_x_km=initial_step_x_km,
+                initial_step_z_km=initial_step_z_km,
+                refinement_level=refinement_count,
+                max_refinement_levels=int(adaptive_max_refinements),
+                refine_factor=float(adaptive_refine_factor),
+                min_step_fraction=float(adaptive_min_step_fraction),
+                depth_window_parent_steps=adaptive_depth_window_parent_steps,
+                grid_point_budget=adaptive_grid_point_budget,
+                posterior_diagnostics=decision_posterior_diagnostics,
+                boundary_probability_threshold=float(adaptive_boundary_probability_threshold),
+            )
+            adaptive_history_rows[-1]["next_action"] = "refine" if proposal.get("apply") else proposal.get("reason")
+            adaptive_history_rows[-1]["next_proposal_reason"] = proposal.get("reason")
+            adaptive_history_rows[-1]["estimated_next_grid_points"] = proposal.get("estimated_grid_points")
+            if not proposal.get("apply"):
+                break
+
+            grid, data, cova, solution, stage_reused = _run_adaptive_axitra_stage(
+                inputs=inputs,
+                radius_km=proposal["grid_radius_km"],
+                depth_min_km=proposal["grid_min_depth_km"],
+                depth_max_km=proposal["grid_max_depth_km"],
+                step_x_km=proposal["step_x_km"],
+                step_z_km=proposal["step_z_km"],
+                max_grid_points=max(int(max_grid_points), int(proposal["max_grid_points_required"])),
+                time_unc_s=float(time_unc_s),
+                rupture_velocity_m_s=float(rupture_velocity_m_s),
+                velocity_slowest_m_s=float(velocity_slowest_m_s),
+                freqmin=float(freqmin),
+                freqmax=float(freqmax),
+                threads=int(threads),
+                progress=bool(progress),
+                invert_displacement=bool(invert_displacement),
+                use_precalculated_Green=use_precalculated_Green,
+                use_noise=use_noise,
+                crosscovariance=bool(crosscovariance),
+                deviatoric=bool(deviatoric),
+                normalized_gf_options=normalized_gf_options,
+                processing_depth_max_km=acquisition_grid_max_depth_km,
+                save_non_inverted_covariance=bool(
+                    html_output or (plot and plot_preset == "full")
+                ),
+                store_station_normal_equations=bool(jackknife_config["enabled"]),
+            )
+            refinement_count += 1
+            adaptive_stage_diag = adaptive_stage_posterior(solution)
+            adaptive_history_rows.append(
+                _adaptive_stage_record(
+                    len(adaptive_history_rows), "refinement", grid, solution, proposal,
+                    posterior_diagnostics=adaptive_stage_diag,
+                )
+            )
+            gf_info["reused"] = bool(stage_reused)
+
+    adaptive_history = pd.DataFrame(adaptive_history_rows)
+    gf_info["adaptive_grid"] = bool(adaptive_grid)
+    gf_info["adaptive_stage_count"] = int(len(adaptive_history))
+    gf_info["adaptive_expansions"] = int(expansion_count)
+    gf_info["adaptive_refinements"] = int(refinement_count)
+    gf_info["adaptive_max_total_reruns"] = int(adaptive_max_total_reruns)
+    gf_info["adaptive_boundary_probability_threshold"] = float(adaptive_boundary_probability_threshold)
+    gf_info["adaptive_expand_on_posterior_boundary"] = bool(adaptive_expand_on_posterior_boundary)
+    gf_info["adaptive_grid_search"] = dict(adaptive_config)
+
     grid_edge_report = diagnose_grid_edge(grid, centroid=solution.centroid)
     results = _build_results(
-        solution, n_uncertainty=n_uncertainty,
+        solution,
+        n_uncertainty=n_uncertainty,
+        uncertainty_scale=uncertainty_scale,
+        uncertainty_scale_floor=uncertainty_scale_floor,
+        uncertainty_random_state=uncertainty_random_state,
         grid_edge_report=grid_edge_report,
     )
-    result_paths = _write_result_tables(results, results_path)
-    result_paths["grid_edge_diagnostic"] = results_path / "grid_edge_diagnostic.csv"
-    results["grid_edge_report"].to_csv(
-        result_paths["grid_edge_diagnostic"], index=False
+    if bool(jackknife_config["enabled"]):
+        results["station_jackknife"] = compute_station_jackknife(
+            solution,
+            data,
+            cova,
+            jackknife_min_stations=int(jackknife_config["jackknife_min_stations"]),
+            threads=int(threads),
+        )
+        # The cached station normal equations are an internal acceleration aid,
+        # not part of the public solution/grid API. Release them once consumed.
+        _clear_station_normal_equation_cache(solution)
+    else:
+        results["station_jackknife"] = None
+    result_paths = _write_result_tables(
+        results, results_path, save_posterior_cells=bool(save_posterior_cells)
     )
+    result_paths["grid_edge_diagnostic"] = results_path / "grid_edge_diagnostic.csv"
+    results["grid_edge_report"].to_csv(result_paths["grid_edge_diagnostic"], index=False)
+    result_paths["adaptive_grid_history"] = results_path / "adaptive_grid_history.csv"
+    adaptive_history.to_csv(result_paths["adaptive_grid_history"], index=False)
 
-    if plot and plot_preset != "none":
-        cmt_summary_path = figure_path / "cmt_summary.png"
-        cmt_figure = plot_cmt_summary(
-            results["summary"], results["centroid"],
-            tensor_mode="deviatoric" if deviatoric else "full",
-            output_file=cmt_summary_path, show=False,
-        )
-        import matplotlib.pyplot as plt
-        plt.close(cmt_figure)
-        custom_figures.insert(0, cmt_summary_path)
-
-    plot_object = None
-    native_figures: list[Path] = []
-    if plot and plot_preset != "none":
-        before = _png_state(output_path)
-        preset = dict(PLOT_PRESETS[plot_preset])
-        if not use_noise:
-            preset.update(
-                seismo_cova=False, noise=False, spectra=False,
-                covariance_matrix=False, covariance_function=False,
-            )
-        plot_object = BayesISOLA.plot(solution, **preset)
-        plot_object.html_log(
-            h1=f"BayesISOLA CMT — {event_id}",
-            mouse_figures="mouse/" if detect_mouse and plot_preset == "full" else None,
-        )
-        native_figures = _changed_pngs(output_path, before)
-
-    figure_paths = list(dict.fromkeys([*custom_figures, *native_figures]))
-    if show and figure_paths:
-        _display_saved_figures(figure_paths)
-
-    return {
+    # Build the public run mapping before workflow-level diagnostics/reporting.
+    # Diagnostic functions consume exactly this structure, so notebook calls and
+    # automated plot-preset generation exercise the same API.
+    run = {
         "inputs": inputs, "grid": grid, "data": data, "cova": cova,
         "solution": solution, "gf": gf_info,
         "event_df": event_df, "station_df": loaded_stations,
@@ -3545,10 +5985,67 @@ def run_auto_cmt(
         "acquisition_window": acquisition_window,
         "waveform_window": waveform_window,
         "grid_edge_report": grid_edge_report,
+        "adaptive_history": adaptive_history,
+        "adaptive_grid": bool(adaptive_grid),
+        "adaptive_grid_search": dict(adaptive_config),
+        "drop_stations": None if drop_stations is None else ([drop_stations] if isinstance(drop_stations, str) else list(drop_stations)),
+        "azimuth_control": dict(azimuth_config),
+        "station_jackknife": dict(jackknife_config),
+        "station_selection": station_selection,
+        "station_selection_path": station_selection_path,
         "crust_file": case_crust_file if gf_source == "axitra" else None,
         "crust_profile": crust_profile, "crust_layers": crust_layers,
         "gf_model_manifest": axitra_model_manifest,
         "results": results, "result_paths": result_paths,
-        "figure_paths": figure_paths, "plot": plot_object,
+        "figure_paths": [], "plot": None,
+        "native_html_path": None, "report_path": None,
     }
+
+    # Workflow-level diagnostic figures. These are separate from PLOT_PRESETS
+    # because the latter is passed directly to BayesISOLA.plot and must retain
+    # its native keyword contract.
+    diagnostic_names = _DIAGNOSTIC_PLOT_PRESETS[plot_preset]
+    if plot and diagnostic_names:
+        diagnostic_paths = _write_diagnostic_preset(
+            run, plot_preset, figure_path,
+            tensor_mode="deviatoric" if deviatoric else "full",
+            dpi=200,
+        )
+        custom_figures = [*diagnostic_paths, *custom_figures]
+
+    # Native plotting and native HTML are intentionally separate concerns.
+    # ``summary`` is workflow-facing only; ``html_output`` always receives the
+    # complete historical BayesISOLA figure suite but those HTML-only files stay
+    # out of ``figure_paths``/``show``.
+    plot_object, native_figures, native_html_path = _render_native_outputs(
+        solution,
+        output_path,
+        event_id=event_id,
+        plot=bool(plot),
+        plot_preset=plot_preset,
+        html_output=html_output,
+        use_noise=use_noise,
+        detect_mouse=bool(detect_mouse),
+    )
+
+    run["plot"] = plot_object
+    run["native_html_path"] = native_html_path
+    figure_paths = list(dict.fromkeys([*custom_figures, *native_figures]))
+    run["figure_paths"] = figure_paths
+
+    # The curated report is generated only after the run mapping is complete so
+    # standalone notebook calls and automatic generation are identical.
+    if write_report:
+        run["report_path"] = write_html_report(
+            run,
+            output_file=output_path / "report.html",
+            embed_images=False,
+            reuse_existing_figures=bool(plot and diagnostic_names),
+            dpi=200,
+        )
+
+    if show and figure_paths:
+        _display_saved_figures(figure_paths)
+
+    return run
 

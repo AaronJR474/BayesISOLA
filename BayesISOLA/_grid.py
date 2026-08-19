@@ -3,7 +3,6 @@
 
 import math
 import numpy as np
-import string
 from pyproj import Geod
 
 def set_grid(self, min_depth=1000):
@@ -39,14 +38,34 @@ def set_grid(self, min_depth=1000):
 	if n_points > max_points:
 		step_x *= (n_points/max_points)**0.333
 		step_z *= (n_points/max_points)**0.333
-	n_steps = int(radius/step_x)
-	n_steps_z = int((self.depth_unc + rupture_length)/step_z)
+	def floor_step_count(span, step):
+		"""Floor a span/step ratio without losing an intended integer to roundoff."""
+		ratio = float(span) / float(step)
+		nearest = round(ratio)
+		if math.isclose(ratio, nearest, rel_tol=1e-12, abs_tol=1e-12):
+			ratio = float(nearest)
+		return int(math.floor(ratio))
+
+	n_steps = floor_step_count(radius, step_x)
+	n_steps_z = floor_step_count(self.depth_unc + rupture_length, step_z)
+
+	def horizontal_id(index):
+		"""Excel-style A..Z, AA.. labels; identical to legacy labels through Z."""
+		index = int(index)
+		if index < 0:
+			raise ValueError("Horizontal grid identifier index cannot be negative.")
+		label = ""
+		while True:
+			index, remainder = divmod(index, 26)
+			label = chr(ord('A') + remainder) + label
+			if index == 0:
+				return label
+			index -= 1
 	depths = []
 	for k in range(-n_steps_z, n_steps_z+1):
 		z = self.data.event['depth']+k*step_z
 		if z >= depth_min and z <= depth_max:
 			depths.append(z)
-	alphabet_string = string.ascii_uppercase
 	numbers = np.arange(1, max(2*n_steps+2, len(depths)+1), 1)
 	numbers_str = str(numbers)[1:-1].split()
 	self.grid = []
@@ -59,14 +78,18 @@ def set_grid(self, min_depth=1000):
 			if math.sqrt(x**2+y**2) > radius and self.circle_shape:
 				continue
 			for z in depths:
-				edge = z==depths[0] or z==depths[-1] or (math.sqrt((abs(x)+step_x)**2+y**2) > radius or math.sqrt((abs(y)+step_x)**2+x**2) > radius) and self.circle_shape or max(abs(i),abs(j))==n_steps
+				horizontal_edge = n_steps > 0 and (
+					((math.sqrt((abs(x)+step_x)**2+y**2) > radius or math.sqrt((abs(y)+step_x)**2+x**2) > radius) and self.circle_shape)
+					or max(abs(i), abs(j)) == n_steps
+				)
+				edge = z == depths[0] or z == depths[-1] or horizontal_edge
 				az = np.degrees(np.arctan2(y, x))
 				dist = np.sqrt(x**2 + y**2)
 				g = Geod(ellps='WGS84')
 				lon, lat, baz = g.fwd(self.data.event['lon'], self.data.event['lat'], az, dist)
 				self.grid.append({'x':x, 'y':y, 'z':z, 'err':0, 'edge':edge,
 					  'lon':lon, 'lat':lat,
-					  'x_id':alphabet_string[n_steps+i], 'y_id':numbers_str[n_steps+j], 'z_id':numbers_str[depths.index(z)], 'path':None})
+					  'x_id':horizontal_id(n_steps+i), 'y_id':numbers_str[n_steps+j], 'z_id':numbers_str[depths.index(z)], 'path':None})
 	self.depths = depths
 	self.step_x = step_x; self.step_z = step_z
 	self.data.log('\nGrid parameters:\n  number of points: {0:4d}\n  horizontal step: {1:5.0f} m\n  vertical step: {2:5.0f} m\n  grid radius: {3:6.3f} km\n  minimal depth: {4:6.3f} km\n  maximal depth: {5:6.3f} km\nEstimated rupture length: {6:6.3f} km'.format(len(self.grid), step_x, step_z, radius/1e3, depth_min/1e3, depth_max/1e3, self.data.rupture_length/1e3))
