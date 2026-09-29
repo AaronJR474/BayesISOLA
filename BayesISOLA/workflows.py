@@ -21,6 +21,7 @@ import math
 import shutil
 import hashlib
 import io
+import time
 
 import numpy as np
 import pandas as pd
@@ -1323,6 +1324,9 @@ def get_mseed_stationxml(
     overwrite: bool = False,
     plot: bool = False,
     show: bool = False,
+    wait_for_realtime_data: bool = True,
+    realtime_wait_buffer_s: float = 60.0,
+    max_realtime_wait_s: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Discover/acquire BayesISOLA-ready miniSEED and StationXML.
 
@@ -1333,6 +1337,11 @@ def get_mseed_stationxml(
     the automated inversion. The resulting common origin-centred interval is then
     used for every station. Explicit ``t_before``/``t_after`` values override only
     the corresponding automatically calculated side.
+
+    When ``wait_for_realtime_data=True`` (default), a ``request_end`` still in
+    the future waits out the shortfall plus ``realtime_wait_buffer_s`` before
+    acquiring, instead of every station failing on a near-real-time trigger;
+    ``max_realtime_wait_s`` caps that wait with a ``TimeoutError``.
 
     ``max_radius_km`` behaves similarly: ``None`` uses :func:`get_max_radius` from
     the MTtime workflow (default scale factor 1.66), while a numerical value is a
@@ -1513,6 +1522,29 @@ def get_mseed_stationxml(
     final_t_after = float(waveform_window["t_after_s"])
     request_start, request_end = origin - final_t_before, origin + final_t_after
 
+    if wait_for_realtime_data:
+        now = UTCDateTime.now()
+        shortfall_s = float(request_end - now)
+        if shortfall_s > 0:
+            wait_s = shortfall_s + float(realtime_wait_buffer_s)
+            if max_realtime_wait_s is not None and wait_s > float(max_realtime_wait_s):
+                raise TimeoutError(
+                    f"Waveform window end ({request_end}) is {shortfall_s:.1f}s ahead of the "
+                    f"current time ({now}); waiting {wait_s:.1f}s (shortfall + "
+                    f"{float(realtime_wait_buffer_s):.0f}s buffer) would exceed max_realtime_wait_s="
+                    f"{float(max_realtime_wait_s):.1f}s. This event is likely being processed too "
+                    "soon after its origin time for the requested window to exist yet at the data "
+                    "provider."
+                )
+            print(
+                f"Waveform window end ({request_end}) is {shortfall_s:.1f}s ahead of the current "
+                f"time ({now}) -- GeoNet's real-time feed will not have recorded that far yet. "
+                f"Waiting {wait_s:.1f}s ({shortfall_s:.1f}s shortfall + "
+                f"{float(realtime_wait_buffer_s):.0f}s buffer for the data to be ingested) before "
+                "starting waveform acquisition."
+            )
+            time.sleep(wait_s)
+
     taup = TauPyModel(model=str(taup_model))
     successful_station_ids: set[str] = set()
     successful_rows: list[dict[str, Any]] = []
@@ -1601,9 +1633,10 @@ def get_mseed_stationxml(
                          "status": status, "reason": "", "cache_reason": cache_reason})
 
     downloaded = pd.DataFrame(successful_rows).sort_values("distance_km", ignore_index=True) if successful_rows else pd.DataFrame()
-    if downloaded.empty:
-        raise ValueError("No station waveforms were acquired successfully.")
 
+    # Persist event/log/window metadata before the empty-result check below, so a
+    # total acquisition failure still leaves download_log.csv on disk with each
+    # candidate's specific failure reason instead of only the generic exception.
     event_df = pd.DataFrame([{
         "event_id": event_id, "origin_time": str(origin), "event_lon": event_lon, "event_lat": event_lat, "event_depth_km": event_depth_km,
         "magnitude": magnitude, "min_radius_km": min_radius_km, "max_radius_km": max_radius_km,
@@ -1611,11 +1644,18 @@ def get_mseed_stationxml(
         "t_before_s": final_t_before, "t_after_s": final_t_after, "fdsn_clients": ",".join(requested_client_labels),
     }])
     download_log = pd.DataFrame(log_rows)
-    write_network_file(downloaded, root / "input" / "network.stn")
     event_df.to_csv(metadata_dir / "event.csv", index=False)
-    downloaded.to_csv(metadata_dir / "stations_downloaded.csv", index=False)
     download_log.to_csv(metadata_dir / "download_log.csv", index=False)
     pd.DataFrame([waveform_window]).to_csv(metadata_dir / "waveform_window.csv", index=False)
+
+    if downloaded.empty:
+        raise ValueError(
+            "No station waveforms were acquired successfully. See "
+            f"{metadata_dir / 'download_log.csv'} for each candidate station's specific failure reason."
+        )
+
+    write_network_file(downloaded, root / "input" / "network.stn")
+    downloaded.to_csv(metadata_dir / "stations_downloaded.csv", index=False)
 
     if plot:
         plot_waveform_section(downloaded, origin, figure_dir / "waveform_record_section_unfiltered.png", show=show)
