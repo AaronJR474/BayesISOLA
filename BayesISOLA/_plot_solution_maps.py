@@ -16,6 +16,31 @@ from mpl_toolkits.mplot3d import Axes3D
 
 from BayesISOLA.MT_comps import a2mt, decompose
 
+
+def _normalized_zero_trace_mt(mt):
+	"""Return a scale-normalized zero-trace tensor for beachball geometry.
+
+	Beachball geometry is invariant to a common positive scale.  Removing the
+	isotropic trace explicitly preserves BayesISOLA's historical zero-trace
+	plotting convention while avoiding very large absolute moment values in ObsPy.
+	Purely isotropic or non-finite tensors return ``None`` because they do not
+	define a deviatoric focal mechanism.
+	"""
+	mt_plot = np.asarray(mt, dtype=float).reshape(-1).copy()
+	if mt_plot.size != 6 or not np.isfinite(mt_plot).all():
+		return None
+
+	original_scale = float(np.max(np.abs(mt_plot)))
+	mt_plot[:3] -= np.mean(mt_plot[:3])
+	deviatoric_scale = float(np.max(np.abs(mt_plot)))
+	if (
+		not np.isfinite(deviatoric_scale)
+		or deviatoric_scale <= np.finfo(float).eps * max(1.0, original_scale)
+	):
+		return None
+	return mt_plot / deviatoric_scale
+
+
 def plot_maps(self, outfile='$outdir/map.png', beachball_size_c=False):
 	"""
 	Plot figures showing how the solution is changing across the grid.
@@ -232,18 +257,20 @@ def plot_map_backend(self, x, y, s, CN, MT, color, width, highlight, xmin, xmax,
 			c.set_alpha(0.7)
 			ax.add_artist(c)
 		if width[i] > self.grid.step_x*1e-3 * 0.04:
-			try:
-				b = beach(MT[i], xy=(x[i], y[i]), width=(width[i], width[i]*np.sign(ydiff)), linewidth=0.5, facecolor=color[i], zorder=10)
-			except:
-				#print('Plotting this moment tensor in a grid point crashed: ', mt2, 'using mopad')
+			mt_plot = _normalized_zero_trace_mt(MT[i])
+			if mt_plot is not None:
 				try:
-					b = beach(MT[i], xy=(x[i], y[i]), width=(width[i], width[i]*np.sign(ydiff)), linewidth=0.5, facecolor=color[i], zorder=10) # width: at side views, mirror along horizontal axis to avoid effect of reversed y-axis
-				except:
-					print('Plotting this moment tensor in a grid point crashed: ', MT[i])
-				else:
+					b = beach(mt_plot, xy=(x[i], y[i]), width=(width[i], width[i]*np.sign(ydiff)), linewidth=0.5, facecolor=color[i], zorder=10) # width: at side views, mirror along horizontal axis to avoid effect of reversed y-axis
+				except Exception:
+					b = None
+				if b is not None:
 					ax.add_collection(b)
-			else:
-				ax.add_collection(b)
+					continue
+
+			# A pure-isotropic tensor has no deviatoric beachball, and an ObsPy
+			# geometry failure should not abort an otherwise valid result map.
+			b = plt.Circle((x[i], y[i]), width[i]/2, facecolor=color[i], edgecolor='k', zorder=10, linewidth=0.5)
+			ax.add_artist(b)
 		elif width[i] > self.grid.step_x*1e-3 * 0.001:
 			b = plt.Circle((x[i], y[i]), width[i]/2, facecolor=color[i], edgecolor='k', zorder=10, linewidth=0.5)
 			ax.add_artist(b)

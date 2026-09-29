@@ -11,15 +11,29 @@ from BayesISOLA.MT_comps import a2mt
 from BayesISOLA._paths import copy_html_resources
 
 def imgpath(img, img2, html):
-	"""
-	Helper function for :func:`html_log`.
-	"""
-	if img and img != 'auto':
-		return img
-	if img2:
-		d = os.path.dirname(html)
-		return os.path.relpath(img2, d)
-	return None
+    """Return a browser-safe path for a figure or packaged HTML resource.
+
+    An explicit ``img`` value other than ``"auto"`` is preserved.  ``"auto"``
+    selects the path recorded in ``img2``.  Relative resources such as
+    ``html/style.css`` are already relative to the generated HTML document and
+    are returned unchanged.  Absolute paths are made relative to the HTML file
+    when possible; on Windows, where paths on different drives cannot be made
+    relative, a file URI is used instead.
+    """
+    if img and img != "auto":
+        return str(img).replace("\\", "/")
+    if not img2:
+        return None
+
+    path = Path(img2).expanduser()
+    if not path.is_absolute():
+        return str(img2).replace("\\", "/")
+
+    try:
+        relative = os.path.relpath(str(path), os.path.dirname(html))
+    except ValueError:
+        return path.resolve().as_uri()
+    return relative.replace("\\", "/")
 
 def html_log(self, outfile='$outdir/index.html', reference=None, h1='ISOLA-ObsPy automated solution', backlink=False, plot_MT='auto', plot_uncertainty='auto', plot_stations='auto', plot_seismo_cova='auto', plot_seismo_sharey='auto', mouse_figures=None, plot_spectra='auto', plot_noise='auto', plot_covariance_function='auto', plot_covariance_matrix='auto', plot_maps='auto', plot_slices='auto', plot_maps_sum='auto', MT_comp_precision=2):
 	"""
@@ -67,7 +81,7 @@ def html_log(self, outfile='$outdir/index.html', reference=None, h1='ISOLA-ObsPy
 	outfile_path = Path(outfile)
 	outfile_path.parent.mkdir(parents=True, exist_ok=True)
 	copy_html_resources(outfile_path.parent / 'html')
-	out = open(outfile, 'w')
+	out = open(outfile, "w", encoding="utf-8", newline="\n")
 	plots = self.plots
 	plot_MT = imgpath(plot_MT, plots['MT'], outfile)
 	plot_uncertainty = imgpath(plot_uncertainty, plots['uncertainty'], outfile)

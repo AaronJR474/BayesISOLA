@@ -86,8 +86,8 @@ def decompose(mt):
 		s1, d1, r1 = angles(n2, n1)
 		s2, d2, r2 = angles(n1, n2)
 	else:
-		s1, d1, r1 = (None, None, None)
-		s2, d2, r2 = (None, None, None)
+		s1, d1, r1 = (np.nan, np.nan, np.nan)
+		s2, d2, r2 = (np.nan, np.nan, np.nan)
 	return {'dc_perc':dc_perc, 'clvd_perc':clvd_perc, 'iso_perc':iso_perc, 'mom':moment, 'Mw':Mw, 'eigvecs':v, 'eigvals':m,
 		'p':p, 't':t, 'n':n, 
 		's1':s1, 'd1':d1, 'r1':r1, 's2':s2, 'd2':d2, 'r2':r2, 

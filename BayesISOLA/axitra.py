@@ -53,7 +53,7 @@ def Axitra_wrapper(i, model, x, y, z, npts_exp, elemse_start_origin,
     gr_xyz = Path(gr_xyz_executable) if gr_xyz_executable is not None else axitra_executable('gr_xyz')
     elemse = Path(elemse_executable) if elemse_executable is not None else axitra_executable('elemse')
 
-    log = open(logfile, 'a')
+    log = open(logfile, 'a', encoding='utf-8', newline='\n')
     for iter in range(iter_max):
         process = subprocess.Popen(
             [str(gr_xyz), '{0:1.3f}'.format(x/1e3), '{0:1.3f}'.format(y/1e3), '{0:1.3f}'.format(z/1e3), point_id, model],
@@ -91,10 +91,10 @@ def Axitra_wrapper(i, model, x, y, z, npts_exp, elemse_start_origin,
         log.write('grid point {0:3d}: elemse stderr (non-fatal): '.format(i) + err.decode(errors='replace').strip() + '\n')
     log.close()
 
-    meta = open(green_path(workspace, 'elemse'+point_id+'.txt'), 'w')
+    meta = open(green_path(workspace, 'elemse'+point_id+'.txt'), 'w', encoding='utf-8', newline='\n')
     md5_crustal = hashlib.md5(open(green_path(workspace, 'crustal.dat'), 'rb').read()).hexdigest()
     md5_station = hashlib.md5(open(green_path(workspace, 'station.dat'), 'rb').read()).hexdigest()
-    txt_soutype = open(green_path(workspace, 'soutype.dat')).read().strip().replace('\n', '_')
+    txt_soutype = open(green_path(workspace, 'soutype.dat'), encoding='utf-8').read().strip().replace('\n', '_')
     meta.write('{0:1.3f} {1:1.3f} {2:1.3f} {3:s} {4:s} {5:s}'.format(x/1e3, y/1e3, z/1e3, md5_crustal, md5_station, txt_soutype))
     meta.close()
 

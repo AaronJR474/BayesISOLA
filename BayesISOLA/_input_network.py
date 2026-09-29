@@ -185,7 +185,7 @@ def write_stations(self, filename=None):
 			f = filename[0:filename.rfind('.')] + '-' + model + filename[filename.rfind('.'):]
 		else:
 			f = filename
-		outp = open(f, 'w')
+		outp = open(f, 'w', encoding='utf-8', newline='\n')
 		outp.write(' Station co-ordinates\n x(N>0,km),y(E>0,km),z(km),azim.,dist.,stat.\n')
 		self.models[model] = 0
 		for s in self.stations:

@@ -1,0 +1,2 @@
+origin_time,origin_lat,origin_lon,origin_depth_km,centroid_time,centroid_time_shift_s,centroid_lat,centroid_lon,centroid_depth_km,offset_north_m,offset_east_m,on_grid_edge,variance_reduction,condition_number
+2026-07-16 09:14:54.328610,-45.038818359375,167.681930541992,37.5175437927246,2026-07-16 09:14:56.528610,2.2,-45.03876463848813,167.57115766167544,69.15725759012517,0.0,-8728.196909627743,True,0.8692764169112568,5.070472331869606

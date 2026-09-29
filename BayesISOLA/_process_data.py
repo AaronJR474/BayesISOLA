@@ -24,7 +24,7 @@ def correct_data(self, water_level=20):
 				tr.simulate(paz_remove=tr.stats.paz, water_level=water_level)
 			else:
 				print(tr.stats)
-				raise('No response in tr.stats for the trace above.')
+				raise RuntimeError('No response in tr.stats for the trace above.')
 	# 2DO: add prefiltering etc., this is not the best way for the correction
 	# 	see http://docs.obspy.org/packages/autogen/obspy.core.trace.Trace.remove_response.html
 	self.d.data_are_corrected = True
