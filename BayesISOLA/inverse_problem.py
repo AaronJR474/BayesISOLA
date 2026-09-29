@@ -15,6 +15,10 @@ from BayesISOLA.MT_comps import decompose, a2mt
 from BayesISOLA._paths import green_path
 
 
+class InsufficientComponentsError(RuntimeError):
+    """Raised when no usable waveform components remain for the inversion."""
+
+
 def whiten_covariance_array(values, covariance_factors, stations, npts):
     """Apply BayesISOLA's stored covariance whitening factors block-by-block.
 
@@ -69,6 +73,18 @@ def invert(point_id, d_shifts, norm_d, Cd_inv, Cd_inv_shifts, nr, comps, station
         ne = 5
     else:
         ne = 6
+
+    if comps == 0:
+        raise InsufficientComponentsError(
+            "Cannot invert grid point {point_id}: no usable data components "
+            "remain (every station has useZ/useN/useE all False). This "
+            "usually means every component was excluded upstream, e.g. by "
+            "mouse-glitch detection or another quality-control step. The "
+            "Green's-function matrix G would have zero rows, making G.T @ G "
+            "an all-zero {ne}x{ne} matrix that cannot be inverted. Check the "
+            "component-selection/mouse-detection log for this event before "
+            "retrying.".format(point_id=point_id, ne=ne)
+        )
 
     if elemse_path:
         elemse = read_elemse_from_files(
