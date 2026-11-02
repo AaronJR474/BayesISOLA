@@ -1289,6 +1289,27 @@ def _raw_inputs_match_request(
         return False, f"existing raw-input validation failed: {exc}"
 
 
+def _is_retryable_download_error(exc: BaseException) -> bool:
+    """Return whether a station download failure is transient and worth retrying."""
+    import http.client
+
+    from obspy.clients.fdsn.header import (
+        FDSNInternalServerException,
+        FDSNServiceUnavailableException,
+        FDSNTimeoutException,
+        FDSNTooManyRequestsException,
+    )
+    from obspy.io.mseed import InternalMSEEDError
+
+    transient = (FDSNInternalServerException, FDSNServiceUnavailableException, FDSNTimeoutException,
+                 FDSNTooManyRequestsException, InternalMSEEDError, http.client.IncompleteRead,
+                 ConnectionError, TimeoutError)
+    if isinstance(exc, transient):
+        return True
+    # Partial windows from a feed that is still catching up fail coverage validation
+    return isinstance(exc, ValueError) and str(exc).startswith("Downloaded files failed validation")
+
+
 def get_mseed_stationxml(
     event_id: str,
     origin_time,
@@ -1327,6 +1348,8 @@ def get_mseed_stationxml(
     wait_for_realtime_data: bool = True,
     realtime_wait_buffer_s: float = 60.0,
     max_realtime_wait_s: float | None = None,
+    max_download_attempts: int = 3,
+    download_retry_wait_s: float = 60.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Discover/acquire BayesISOLA-ready miniSEED and StationXML.
 
@@ -1338,10 +1361,17 @@ def get_mseed_stationxml(
     used for every station. Explicit ``t_before``/``t_after`` values override only
     the corresponding automatically calculated side.
 
-    When ``wait_for_realtime_data=True`` (default), a ``request_end`` still in
-    the future waits out the shortfall plus ``realtime_wait_buffer_s`` before
-    acquiring, instead of every station failing on a near-real-time trigger;
-    ``max_realtime_wait_s`` caps that wait with a ``TimeoutError``.
+    When ``wait_for_realtime_data=True`` (default), acquisition waits until
+    ``request_end + realtime_wait_buffer_s`` has passed, so a near-real-time
+    trigger does not request data the provider has not recorded or ingested
+    yet; ``max_realtime_wait_s`` caps that wait with a ``TimeoutError``.
+
+    Station downloads that fail with a transient error (HTTP 429/500/503,
+    timeouts, connection drops, incomplete/corrupt miniSEED, or a window that
+    fails coverage validation) are retried in up to ``max_download_attempts``
+    passes. Each later pass waits ``download_retry_wait_s`` and only re-requests
+    the stations that failed transiently, giving a loaded real-time server time
+    to recover. "No data" and empty-stream failures are not retried.
 
     ``max_radius_km`` behaves similarly: ``None`` uses :func:`get_max_radius` from
     the MTtime workflow (default scale factor 1.66), while a numerical value is a
@@ -1522,11 +1552,19 @@ def get_mseed_stationxml(
     final_t_after = float(waveform_window["t_after_s"])
     request_start, request_end = origin - final_t_before, origin + final_t_after
 
+    if max_download_attempts < 1:
+        raise ValueError("max_download_attempts must be >= 1.")
+    if not np.isfinite(float(download_retry_wait_s)) or float(download_retry_wait_s) < 0:
+        raise ValueError("download_retry_wait_s must be a finite value >= 0.")
+
+    waveform_window["realtime_wait_s"] = 0.0
     if wait_for_realtime_data:
+        # The buffer applies even when request_end has just passed, as the
+        # real-time feed can lag the wall clock by up to a minute.
         now = UTCDateTime.now()
         shortfall_s = float(request_end - now)
-        if shortfall_s > 0:
-            wait_s = shortfall_s + float(realtime_wait_buffer_s)
+        wait_s = shortfall_s + float(realtime_wait_buffer_s)
+        if wait_s > 0:
             if max_realtime_wait_s is not None and wait_s > float(max_realtime_wait_s):
                 raise TimeoutError(
                     f"Waveform window end ({request_end}) is {shortfall_s:.1f}s ahead of the "
@@ -1538,99 +1576,117 @@ def get_mseed_stationxml(
                 )
             print(
                 f"Waveform window end ({request_end}) is {shortfall_s:.1f}s ahead of the current "
-                f"time ({now}) -- GeoNet's real-time feed will not have recorded that far yet. "
-                f"Waiting {wait_s:.1f}s ({shortfall_s:.1f}s shortfall + "
-                f"{float(realtime_wait_buffer_s):.0f}s buffer for the data to be ingested) before "
-                "starting waveform acquisition."
+                f"time ({now}) -- GeoNet's real-time feed may not have ingested that far yet. "
+                f"Waiting {wait_s:.1f}s (until {float(realtime_wait_buffer_s):.0f}s after the window end) "
+                "before starting waveform acquisition."
             )
             time.sleep(wait_s)
+            waveform_window["realtime_wait_s"] = float(wait_s)
 
     taup = TauPyModel(model=str(taup_model))
     successful_station_ids: set[str] = set()
     successful_rows: list[dict[str, Any]] = []
 
-    for row in candidate_df.to_dict("records"):
-        client_index = int(row.get("fdsn_client_index", 0))
-        if client_index < 0 or client_index >= len(fdsn_clients):
-            raise ValueError(f"Station row references fdsn_client_index={client_index}, but only {len(fdsn_clients)} active clients exist.")
-        fdsn = fdsn_clients[client_index]
-        client_label = str(row.get("fdsn_client", requested_client_labels[client_index]))
-        location = _normalize_location(row.get("location"))
-        location_request = location if location else "--"
-        station_id = str(row.get("station_id") or f"{row['network']}.{row['station']}.{location or '--'}")
+    # Transient failures are retried in later passes, re-requesting only the
+    # stations that failed so a loaded real-time server can recover.
+    pending_rows = candidate_df.to_dict("records")
+    for attempt in range(1, int(max_download_attempts) + 1):
+        if attempt > 1:
+            print(
+                f"{len(pending_rows)} station download(s) failed transiently; waiting "
+                f"{float(download_retry_wait_s):.0f}s before attempt {attempt}/{int(max_download_attempts)}."
+            )
+            time.sleep(float(download_retry_wait_s))
+        retry_rows: list[dict[str, Any]] = []
+        for row in pending_rows:
+            client_index = int(row.get("fdsn_client_index", 0))
+            if client_index < 0 or client_index >= len(fdsn_clients):
+                raise ValueError(f"Station row references fdsn_client_index={client_index}, but only {len(fdsn_clients)} active clients exist.")
+            fdsn = fdsn_clients[client_index]
+            client_label = str(row.get("fdsn_client", requested_client_labels[client_index]))
+            location = _normalize_location(row.get("location"))
+            location_request = location if location else "--"
+            station_id = str(row.get("station_id") or f"{row['network']}.{row['station']}.{location or '--'}")
 
-        if station_id in successful_station_ids:
-            log_rows.append({**row, "station_id": station_id, "fdsn_client": client_label, "status": "duplicate_client_station",
-                             "reason": "The same network/station/location was already acquired successfully from an earlier client.", "cache_reason": "not_checked"})
-            continue
-
-        if "distance_km" in row and pd.notna(row["distance_km"]) and np.isfinite(float(row["distance_km"])):
-            distance_km = float(row["distance_km"])
-            azimuth = float(row.get("azimuth_deg", np.nan)); back_azimuth = float(row.get("back_azimuth_deg", np.nan))
-        else:
-            distance_m, azimuth, back_azimuth = gps2dist_azimuth(event_lat, event_lon, float(row["station_lat"]), float(row["station_lon"]))
-            distance_km = float(distance_m) / 1000.0
-        if distance_km < min_radius_km - distance_tolerance_km or distance_km > max_radius_km + distance_tolerance_km:
-            log_rows.append({**row, "station_id": station_id, "fdsn_client": client_label, "distance_km": distance_km,
-                             "status": "distance_excluded", "reason": f"Distance {distance_km:.6f} km lies outside [{min_radius_km:.6f}, {max_radius_km:.6f}] km.",
-                             "cache_reason": "not_checked"})
-            continue
-
-        p_time, s_time = _compute_arrivals(taup, event_depth_km, event_lat, event_lon, float(row["station_lat"]), float(row["station_lon"]))
-        base = {**row, "event_id": event_id, "station_id": station_id, "fdsn_client": client_label, "location": location,
-                "distance_km": distance_km, "azimuth_deg": float(azimuth) % 360.0 if np.isfinite(azimuth) else np.nan,
-                "back_azimuth_deg": float(back_azimuth) % 360.0 if np.isfinite(back_azimuth) else np.nan,
-                "p_arrival_s": p_time, "s_arrival_s": s_time, "ground_level": bool(ground_level)}
-        _, selected_channels = _row_component_selection(base)
-        selected_query = ",".join(selected_channels)
-        sample_interval_s = 1.0 / float(base["sample_rate"])
-        padding_s = 2.0 * sample_interval_s
-        waveform_request_start, waveform_request_end = request_start - padding_s, request_end + padding_s
-        waveform_path = waveform_dir / f"{station_id}.{base['channel_prefix']}.mseed"
-        stationxml_path = stationxml_dir / f"{station_id}.{base['channel_prefix']}.xml"
-        existed_before = waveform_path.exists() or stationxml_path.exists()
-        cache_reason, reuse = "overwrite=True", False
-
-        if not overwrite and waveform_path.exists() and stationxml_path.exists():
-            reuse, cache_reason = _raw_inputs_match_request(waveform_path, stationxml_path, row=base, request_start=request_start,
-                                                            request_end=request_end, response_time=origin, read=read, read_inventory=read_inventory)
-
-        if reuse:
-            status = "existing"
-        else:
-            tmp_waveform = waveform_path.with_name(waveform_path.name + ".tmp")
-            tmp_stationxml = stationxml_path.with_name(stationxml_path.name + ".tmp")
-            try:
-                inventory = fdsn.get_stations(network=base["network"], station=base["station"], location=location_request, channel=selected_query,
-                                              starttime=waveform_request_start, endtime=waveform_request_end, level="response")
-                stream = fdsn.get_waveforms(network=base["network"], station=base["station"], location=location_request, channel=selected_query,
-                                            starttime=waveform_request_start, endtime=waveform_request_end, attach_response=False)
-                if len(stream) == 0:
-                    raise ValueError("Waveform request returned an empty stream.")
-                stream.write(str(tmp_waveform), format="MSEED")
-                inventory.write(str(tmp_stationxml), format="STATIONXML")
-                valid, reason = _raw_inputs_match_request(tmp_waveform, tmp_stationxml, row=base, request_start=request_start,
-                                                          request_end=request_end, response_time=origin, read=read, read_inventory=read_inventory)
-                if not valid:
-                    raise ValueError(f"Downloaded files failed validation: {reason}")
-                tmp_waveform.replace(waveform_path); tmp_stationxml.replace(stationxml_path)
-                status = "overwritten" if overwrite and existed_before else "redownloaded" if existed_before else "downloaded"
-                cache_reason = reason
-            except Exception as exc:
-                for temporary in (tmp_waveform, tmp_stationxml):
-                    if temporary.exists():
-                        temporary.unlink()
-                log_rows.append({**base, "request_starttime": str(request_start), "request_endtime": str(request_end),
-                                 "status": "download_failed", "reason": str(exc), "cache_reason": cache_reason})
+            if station_id in successful_station_ids:
+                log_rows.append({**row, "station_id": station_id, "fdsn_client": client_label, "status": "duplicate_client_station",
+                                 "reason": "The same network/station/location was already acquired successfully from an earlier client.", "cache_reason": "not_checked"})
                 continue
 
-        successful = {**base, "origin_time": str(origin), "event_lon": event_lon, "event_lat": event_lat, "event_depth_km": event_depth_km,
-                      "magnitude": magnitude, "min_radius_km": min_radius_km, "max_radius_km": max_radius_km,
-                      "request_starttime": str(request_start), "request_endtime": str(request_end), "waveform_path": str(waveform_path),
-                      "stationxml_path": str(stationxml_path), "download_status": status}
-        successful_rows.append(successful); successful_station_ids.add(station_id)
-        log_rows.append({**base, "request_starttime": str(request_start), "request_endtime": str(request_end),
-                         "status": status, "reason": "", "cache_reason": cache_reason})
+            if "distance_km" in row and pd.notna(row["distance_km"]) and np.isfinite(float(row["distance_km"])):
+                distance_km = float(row["distance_km"])
+                azimuth = float(row.get("azimuth_deg", np.nan)); back_azimuth = float(row.get("back_azimuth_deg", np.nan))
+            else:
+                distance_m, azimuth, back_azimuth = gps2dist_azimuth(event_lat, event_lon, float(row["station_lat"]), float(row["station_lon"]))
+                distance_km = float(distance_m) / 1000.0
+            if distance_km < min_radius_km - distance_tolerance_km or distance_km > max_radius_km + distance_tolerance_km:
+                log_rows.append({**row, "station_id": station_id, "fdsn_client": client_label, "distance_km": distance_km,
+                                 "status": "distance_excluded", "reason": f"Distance {distance_km:.6f} km lies outside [{min_radius_km:.6f}, {max_radius_km:.6f}] km.",
+                                 "cache_reason": "not_checked"})
+                continue
+
+            p_time, s_time = _compute_arrivals(taup, event_depth_km, event_lat, event_lon, float(row["station_lat"]), float(row["station_lon"]))
+            base = {**row, "event_id": event_id, "station_id": station_id, "fdsn_client": client_label, "location": location,
+                    "distance_km": distance_km, "azimuth_deg": float(azimuth) % 360.0 if np.isfinite(azimuth) else np.nan,
+                    "back_azimuth_deg": float(back_azimuth) % 360.0 if np.isfinite(back_azimuth) else np.nan,
+                    "p_arrival_s": p_time, "s_arrival_s": s_time, "ground_level": bool(ground_level)}
+            _, selected_channels = _row_component_selection(base)
+            selected_query = ",".join(selected_channels)
+            sample_interval_s = 1.0 / float(base["sample_rate"])
+            padding_s = 2.0 * sample_interval_s
+            waveform_request_start, waveform_request_end = request_start - padding_s, request_end + padding_s
+            waveform_path = waveform_dir / f"{station_id}.{base['channel_prefix']}.mseed"
+            stationxml_path = stationxml_dir / f"{station_id}.{base['channel_prefix']}.xml"
+            existed_before = waveform_path.exists() or stationxml_path.exists()
+            cache_reason, reuse = "overwrite=True", False
+
+            if not overwrite and waveform_path.exists() and stationxml_path.exists():
+                reuse, cache_reason = _raw_inputs_match_request(waveform_path, stationxml_path, row=base, request_start=request_start,
+                                                                request_end=request_end, response_time=origin, read=read, read_inventory=read_inventory)
+
+            if reuse:
+                status = "existing"
+            else:
+                tmp_waveform = waveform_path.with_name(waveform_path.name + ".tmp")
+                tmp_stationxml = stationxml_path.with_name(stationxml_path.name + ".tmp")
+                try:
+                    inventory = fdsn.get_stations(network=base["network"], station=base["station"], location=location_request, channel=selected_query,
+                                                  starttime=waveform_request_start, endtime=waveform_request_end, level="response")
+                    stream = fdsn.get_waveforms(network=base["network"], station=base["station"], location=location_request, channel=selected_query,
+                                                starttime=waveform_request_start, endtime=waveform_request_end, attach_response=False)
+                    if len(stream) == 0:
+                        raise ValueError("Waveform request returned an empty stream.")
+                    stream.write(str(tmp_waveform), format="MSEED")
+                    inventory.write(str(tmp_stationxml), format="STATIONXML")
+                    valid, reason = _raw_inputs_match_request(tmp_waveform, tmp_stationxml, row=base, request_start=request_start,
+                                                              request_end=request_end, response_time=origin, read=read, read_inventory=read_inventory)
+                    if not valid:
+                        raise ValueError(f"Downloaded files failed validation: {reason}")
+                    tmp_waveform.replace(waveform_path); tmp_stationxml.replace(stationxml_path)
+                    status = "overwritten" if overwrite and existed_before else "redownloaded" if existed_before else "downloaded"
+                    cache_reason = reason
+                except Exception as exc:
+                    for temporary in (tmp_waveform, tmp_stationxml):
+                        if temporary.exists():
+                            temporary.unlink()
+                    retry = attempt < max_download_attempts and _is_retryable_download_error(exc)
+                    if retry:
+                        retry_rows.append(row)
+                    log_rows.append({**base, "request_starttime": str(request_start), "request_endtime": str(request_end),
+                                     "status": "download_retry" if retry else "download_failed", "reason": str(exc),
+                                     "cache_reason": cache_reason, "download_attempt": attempt})
+                    continue
+
+            successful = {**base, "origin_time": str(origin), "event_lon": event_lon, "event_lat": event_lat, "event_depth_km": event_depth_km,
+                          "magnitude": magnitude, "min_radius_km": min_radius_km, "max_radius_km": max_radius_km,
+                          "request_starttime": str(request_start), "request_endtime": str(request_end), "waveform_path": str(waveform_path),
+                          "stationxml_path": str(stationxml_path), "download_status": status}
+            successful_rows.append(successful); successful_station_ids.add(station_id)
+            log_rows.append({**base, "request_starttime": str(request_start), "request_endtime": str(request_end),
+                             "status": status, "reason": "", "cache_reason": cache_reason, "download_attempt": attempt})
+        if not retry_rows:
+            break
+        pending_rows = retry_rows
 
     downloaded = pd.DataFrame(successful_rows).sort_values("distance_km", ignore_index=True) if successful_rows else pd.DataFrame()
 
@@ -5209,6 +5265,8 @@ def run_auto_cmt(
     channel_priority: ChannelPriority = ("HH", "BH", "LH"),
     taup_model: str = "iasp91",
     overwrite_waveforms: bool = False,
+    max_download_attempts: int = 3,
+    download_retry_wait_s: float = 60.0,
     location_unc_km: float = 0.0,
     time_unc_s: float = 2.0,
     min_depth_km: float = 5.0,
@@ -5567,6 +5625,8 @@ def run_auto_cmt(
             noise_factor=noise_factor, edge_margin_s=edge_margin_s,
             minimum_pre_event_s=minimum_pre_event_s,
             overwrite=bool(overwrite_waveforms), plot=False, show=False,
+            max_download_attempts=max_download_attempts,
+            download_retry_wait_s=download_retry_wait_s,
         )
     else:
         stations = _coerce_station_df(station_df)

@@ -2,6 +2,24 @@
 
 All notable changes to BayesISOLA are documented in this file.
 
+## [0.2.2] - 2026-11-03
+
+### Near-real-time waveform acquisition
+
+- `get_mseed_stationxml` now waits until `request_end + realtime_wait_buffer_s`
+  has passed. Previously the buffer was only applied when `request_end` was
+  still in the future, so a run starting just after the window end could
+  request data GeoNet had not yet ingested and fail for every station. The wait
+  is recorded as `realtime_wait_s` in `waveform_window.csv`.
+- Added retry passes for transient station download failures (HTTP 429/500/503,
+  timeouts, connection drops, incomplete/corrupt miniSEED, and windows failing
+  coverage validation). Up to `max_download_attempts` passes (default 3) are
+  made, waiting `download_retry_wait_s` (default 60 s) between passes and
+  re-requesting only the stations that failed. "No data" and empty-stream
+  failures are not retried. Both options are exposed through `run_auto_cmt`.
+- `download_log.csv` gains a `download_attempt` column and a `download_retry`
+  status for attempts that will be retried.
+
 ## [0.2.0] - 2026-08-19
 
 BayesISOLA 0.2.0 extends the automated workflow around the validated native
