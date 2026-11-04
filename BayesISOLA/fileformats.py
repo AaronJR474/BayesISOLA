@@ -97,7 +97,7 @@ def read_elemse(nr, npts, filename, stations, invert_displacement=False):
 	return elemse_all
 
 # one Axitra elemse record: Fortran record markers around (t, N, E, Z) as float32
-_ELEMSE_RECORD = np.dtype([('head', '=i4'), ('t', '=f4'), ('N', '=f4'), ('E', '=f4'), ('Z', '=f4'), ('tail', '=i4')])
+ELEMSE_RECORD = np.dtype([('head', '=i4'), ('t', '=f4'), ('N', '=f4'), ('E', '=f4'), ('Z', '=f4'), ('tail', '=i4')])
 
 def read_elemse_array(nr, npts, filename, stations):
 	"""
@@ -135,7 +135,7 @@ def read_elemse_array(nr, npts, filename, stations):
 				f = filename[0:filename.rfind('.')] + '-' + model + filename[filename.rfind('.'):]
 			else:
 				f = filename
-			records[model] = np.fromfile(f, dtype=_ELEMSE_RECORD)
+			records[model] = np.fromfile(f, dtype=ELEMSE_RECORD)
 			if np.any(records[model]['head'] != 16) or np.any(records[model]['tail'] != 16):
 				raise ValueError('Unexpected record layout in elemse file {0:s}'.format(f))
 			used[model] = 0

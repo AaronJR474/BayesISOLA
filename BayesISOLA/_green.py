@@ -1,11 +1,13 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 import multiprocessing as mp
 import numpy as np
 import os.path
 import hashlib
 import re
+import shutil
 from pathlib import Path
 from contextlib import nullcontext
 
@@ -14,7 +16,8 @@ try:
 except ImportError:
 	tqdm = None
 
-from BayesISOLA.axitra import Axitra_wrapper
+from BayesISOLA.axitra import AXITRA_MAX_RECEIVERS, Axitra_depth_chunk, Axitra_wrapper
+from BayesISOLA.fileformats import ELEMSE_RECORD
 import BayesISOLA.syngine
 from BayesISOLA._paths import axitra_executable, green_path
 
@@ -297,11 +300,16 @@ def calculate_or_verify_Green(self):
 
 def calculate_Green(self):
 	"""
-	Runs :func:`Axitra_wrapper` (Green's function calculation) in parallel.
+	Calculate Green's functions (elementary seismograms) for all grid points.
+
+	By default (``self.gf_bundle_depths``) Axitra runs once per source depth,
+	with every (grid point, station) offset as a receiver, and the output is
+	split into the usual per-point elemse files (see :func:`_calculate_Green_by_depth`).
+	Otherwise :func:`Axitra_wrapper` runs once per grid point. Both run in
+	parallel over ``self.threads`` processes and give the same files.
 
 	When ``self.progress`` is true and :mod:`tqdm` is available, progress is
-	reported per completed spatial grid point. The numerical work and result
-	ordering are unchanged.
+	reported per completed spatial grid point.
 	"""
 	grid = self.grid.grid
 	logfile = self.d.outdir+'/log_green.txt'
@@ -315,6 +323,9 @@ def calculate_Green(self):
 		desc = "Green's functions" + (f" ({model})" if model else "")
 		todo = _restore_cached_Green(self, model)
 		if not todo:
+			continue
+		if getattr(self, 'gf_bundle_depths', True) and self.d.models[model] <= AXITRA_MAX_RECEIVERS:
+			_calculate_Green_by_depth(self, model, todo, logfile, gr_xyz_executable, elemse_executable, desc, show_progress)
 			continue
 		if self.threads > 1: # parallel
 			with mp.Pool(processes=self.threads) as pool:
@@ -335,6 +346,137 @@ def calculate_Green(self):
 				if not ok:
 					gp['err'] = 1
 					gp['VR'] = -10
+
+def _depth_chunks(self, model, todo):
+	"""
+	Group grid points by source depth and split them into balanced Axitra runs.
+
+	Parameters
+	----------
+	model : str
+		Crustal model identifier, '' for the single-model case
+	todo : list of int
+		Indices of grid points to compute
+
+	Returns
+	-------
+	chunks : list of tuple
+		(depth string as passed to gr_xyz, list of grid point indices), shallow
+		depths first as they are the most expensive
+	"""
+	grid = self.grid.grid
+	nr = self.d.models[model]
+	by_depth = {}
+	for i in todo:
+		by_depth.setdefault('{0:1.3f}'.format(grid[i]['z']/1e3), []).append(i)
+	# enough runs to keep every process busy, but few receivers per run cost little
+	max_points = max(1, AXITRA_MAX_RECEIVERS // max(nr, 1))
+	target_points = max(1, math.ceil(len(todo) / (2 * max(int(self.threads), 1))))
+	points_per_run = min(max_points, target_points)
+	chunks = []
+	for z in sorted(by_depth, key=float):
+		indices = by_depth[z]
+		size = math.ceil(len(indices) / math.ceil(len(indices) / points_per_run))
+		for start in range(0, len(indices), size):
+			chunks.append((z, indices[start:start+size]))
+	return chunks
+
+def _station_coordinates(self, model):
+	"""
+	Read the receiver coordinates Axitra uses for a crustal model.
+
+	Parameters
+	----------
+	model : str
+		Crustal model identifier, '' for the single-model case
+
+	Returns
+	-------
+	coordinates : list of tuple
+		(north, east, depth) [km] of each station, in Axitra receiver order
+	"""
+	name = 'station-' + model + '.dat' if model else 'station.dat'
+	lines = Path(green_path(self.d.green_dir, name)).read_text(encoding='utf-8').splitlines()[2:]
+	nr = self.d.models[model]
+	return [tuple(float(v) for v in line.split()[:3]) for line in lines[:nr]]
+
+def _calculate_Green_by_depth(self, model, todo, logfile, gr_xyz_executable, elemse_executable, desc, show_progress):
+	"""
+	Compute elemse files with one Axitra run per source depth (or chunk of it).
+
+	Each grid point's receivers are its station offsets, so the records written
+	for it are those of the per-point calculation: the per-point elemse files and
+	metadata are written exactly as :func:`Axitra_wrapper` writes them.
+
+	Parameters
+	----------
+	model : str
+		Crustal model identifier, '' for the single-model case
+	todo : list of int
+		Indices of grid points to compute
+	logfile : str
+		Path to the Green's function log
+	gr_xyz_executable, elemse_executable : str
+		Paths to the Axitra executables
+	desc : str
+		Progress bar label
+	show_progress : bool
+		Show a tqdm progress bar
+	"""
+	grid = self.grid.grid
+	green_dir = Path(self.d.green_dir)
+	suffix = '-' + model if model else ''
+	stations = _station_coordinates(self, model)
+	nr = len(stations)
+	npts = 2 ** self.npts_exp
+	md5_crustal, md5_station, txt_soutype = _green_signature(self)
+	chunks = _depth_chunks(self, model, todo)
+
+	tasks = []
+	for c, (z, indices) in enumerate(chunks):
+		receivers = []
+		for i in indices:
+			# source position as written for the per-point gr_xyz run
+			xs = float('{0:1.3f}'.format(grid[i]['x']/1e3))
+			ys = float('{0:1.3f}'.format(grid[i]['y']/1e3))
+			receivers += [(sx - xs, sy - ys, sz) for sx, sy, sz in stations]
+		chunk_id = 'd' + str(c).zfill(4)
+		tasks.append((chunk_id, model, z, receivers, self.npts_exp, self.elemse_start_origin, str(green_dir), gr_xyz_executable, elemse_executable))
+
+	log = open(logfile, 'a', encoding='utf-8', newline='\n')
+	progress_context = tqdm(total=len(todo), desc=desc, unit='pt') if show_progress else nullcontext()
+	pool_context = mp.Pool(processes=int(self.threads)) if self.threads > 1 else nullcontext()
+	with progress_context as bar, pool_context as pool:
+		pending = [pool.apply_async(Axitra_depth_chunk, args=task) for task in tasks] if pool is not None else None
+		for k, ((z, indices), task) in enumerate(zip(chunks, tasks)):
+			elemse_file, message = pending[k].get() if pending is not None else Axitra_depth_chunk(*task)
+			if message:
+				log.write(message)
+			records = None
+			if elemse_file is not None:
+				records = np.fromfile(elemse_file, dtype=ELEMSE_RECORD)
+				if len(records) != len(indices) * nr * 6 * npts:
+					log.write('depth {0:s} km ({1:s}): elemse wrote {2:d} records, expected {3:d}\n'.format(
+						z, task[0], len(records), len(indices) * nr * 6 * npts))
+					records = None
+			if records is None:
+				for i in indices:
+					grid[i]['err'] = 1
+					grid[i]['VR'] = -10
+			else:
+				# split into the per-point files, byte-identical record layout
+				records = records.reshape(len(indices), nr * 6 * npts)
+				for k, i in enumerate(indices):
+					point_id = str(i).zfill(4) + suffix
+					records[k].tofile(green_path(green_dir, 'elemse' + point_id + '.dat'))
+					with open(green_path(green_dir, 'elemse' + point_id + '.txt'), 'w', encoding='utf-8', newline='\n') as meta:
+						meta.write('{0:1.3f} {1:1.3f} {2:1.3f} {3:s} {4:s} {5:s}'.format(
+							grid[i]['x']/1e3, grid[i]['y']/1e3, grid[i]['z']/1e3, md5_crustal, md5_station, txt_soutype))
+				log.write('depth {0:s} km ({1:s}): {2:d} grid points, {3:d} receivers\n'.format(z, task[0], len(indices), len(indices) * nr))
+			shutil.rmtree(green_dir / 'depth_runs' / task[0], ignore_errors=True)
+			if bar is not None:
+				bar.update(len(indices))
+	log.close()
 
 def use_elemse_from_files(self, path):
 	"""

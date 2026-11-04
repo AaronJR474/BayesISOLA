@@ -36,6 +36,8 @@ class process_data:
     :type trim_filter_data: bool, optional
     :param decimate_shift: if ``True``, run :func:`decimate_shift`
     :type decimate_shift: bool, optional
+    :param gf_bundle_depths: if ``True`` (default), run Axitra once per source depth with all grid point/station offsets as receivers instead of once per grid point (same elementary seismograms, much faster)
+    :type gf_bundle_depths: bool, optional
     :param gf_fmax_factor: if set, compute Green's functions only up to ``gf_fmax_factor * fmax`` instead of the Nyquist frequency (data are prefiltered to the same band); ``None`` keeps the original behaviour
     :type gf_fmax_factor: float, optional
 
@@ -85,7 +87,7 @@ class process_data:
 	from BayesISOLA._parameters import set_frequencies, set_working_sampling, count_components, min_time, max_time, set_time_window, set_parameters, skip_short_records
 	from BayesISOLA._process_data import correct_data, trim_filter_data, decimate_shift
 
-	def __init__(self, data, grid, s_velocity=3000, velocity_ot_the_fastest_wave=8000, velocity_ot_the_slowest_wave = 1000, threads=2, invert_displacement=False, use_precalculated_Green=False, correct_data=True, set_parameters=True, fmax=1., fmin=0., min_depth=1000., skip_short_records=False, calculate_or_verify_Green=True, trim_filter_data=True, decimate_shift=True, progress=True, gf_fmax_factor=None):
+	def __init__(self, data, grid, s_velocity=3000, velocity_ot_the_fastest_wave=8000, velocity_ot_the_slowest_wave = 1000, threads=2, invert_displacement=False, use_precalculated_Green=False, correct_data=True, set_parameters=True, fmax=1., fmin=0., min_depth=1000., skip_short_records=False, calculate_or_verify_Green=True, trim_filter_data=True, decimate_shift=True, progress=True, gf_fmax_factor=None, gf_bundle_depths=True):
 		self.d = data
 		self.grid = grid
 		self.s_velocity = s_velocity
@@ -96,6 +98,7 @@ class process_data:
 		self.invert_displacement = invert_displacement
 		self.use_precalculated_Green = use_precalculated_Green
 		self.gf_fmax_factor = gf_fmax_factor
+		self.gf_bundle_depths = bool(gf_bundle_depths)
 		self.data = []
 		self.noise = []
 		self.fmax = 0.

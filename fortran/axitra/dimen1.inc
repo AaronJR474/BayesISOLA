@@ -26,7 +26,7 @@ c*****************************************************************************
       common /dim1d/ rr(nrsp),nc,nr,ns,irs(nrp,nsp),nrs
       common /dim1e/ hc(ncp),vp(ncp),vs(ncp),vp2(ncp),vs2(ncp),
      &               rho(ncp),qp(ncp),qs(ncp)
-      common /dim1f/ ncr,irc(ncp),nzr(ncp),nzrr(nrp,ncp),
-     &               izrr(nrp,nrp,ncp)
+      common /dim1f/ ncr,irc(ncp),nzr(ncp),nzrr(nzrp,ncp),
+     &               izrr(nrp,nzrp,ncp)
       common /dim1g/ ncs,isc(ncp),nzs(ncp),nzss(nsp,ncp),
      &               izss(nsp,nsp,ncp)

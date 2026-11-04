@@ -5200,6 +5200,7 @@ def _run_adaptive_axitra_stage(
     save_non_inverted_covariance: bool = False,
     store_station_normal_equations: bool = False,
     gf_fmax_factor: float | None = None,
+    gf_bundle_depths: bool = True,
 ) -> tuple[Any, Any, Any, Any, bool]:
     """Rerun Axitra on an explicit adaptive grid without reacquiring waveforms.
 
@@ -5246,6 +5247,7 @@ def _run_adaptive_axitra_stage(
         trim_filter_data=False,
         decimate_shift=False,
         gf_fmax_factor=gf_fmax_factor,
+        gf_bundle_depths=gf_bundle_depths,
     )
     _set_fixed_adaptive_time_window(data, grid, processing_depth_max_km)
 
@@ -5336,6 +5338,7 @@ def run_auto_cmt(
     invert_displacement: bool = False,
     use_precalculated_Green: bool | str = "auto",
     gf_fmax_factor: float | None = None,
+    gf_bundle_depths: bool = True,
     covariance: str = "noise",
     crosscovariance: bool = False,
     deviatoric: bool = False,
@@ -5556,6 +5559,10 @@ def run_auto_cmt(
     ``gf_fmax_factor * freqmax`` instead of the Nyquist frequency; ``None``
     (default) keeps the original behaviour. A factor of 3 changes the filtered
     Green's functions by about 1-2% for about 25% less Axitra time.
+    ``gf_bundle_depths=True`` (default) runs Axitra once per source depth with
+    every grid point/station offset as a receiver, instead of once per grid
+    point. The elementary seismograms agree to float32 precision (~1e-7) and
+    the Green's-function stage is 7-12x faster; ``False`` restores per-point runs.
 
     Returns
     -------
@@ -5861,6 +5868,7 @@ def run_auto_cmt(
         calculate_or_verify_Green=False,
         trim_filter_data=False, decimate_shift=False,
         gf_fmax_factor=gf_fmax_factor,
+        gf_bundle_depths=gf_bundle_depths,
     )
     if adaptive_grid:
         _set_fixed_adaptive_time_window(data, grid, acquisition_grid_max_depth_km)
@@ -6018,6 +6026,7 @@ def run_auto_cmt(
                     normalized_gf_options=normalized_gf_options,
                     processing_depth_max_km=acquisition_grid_max_depth_km,
                     gf_fmax_factor=gf_fmax_factor,
+                    gf_bundle_depths=gf_bundle_depths,
                     save_non_inverted_covariance=bool(
                         html_output or (plot and plot_preset == "full")
                     ),
@@ -6081,6 +6090,7 @@ def run_auto_cmt(
                 normalized_gf_options=normalized_gf_options,
                 processing_depth_max_km=acquisition_grid_max_depth_km,
                 gf_fmax_factor=gf_fmax_factor,
+                gf_bundle_depths=gf_bundle_depths,
                 save_non_inverted_covariance=bool(
                     html_output or (plot and plot_preset == "full")
                 ),

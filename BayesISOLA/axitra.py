@@ -7,6 +7,7 @@ Calculate Green's function using ``Axitra`` code.
 """
 
 from pathlib import Path
+import re
 import subprocess
 import hashlib
 
@@ -101,3 +102,86 @@ def Axitra_wrapper(i, model, x, y, z, npts_exp, elemse_start_origin,
     meta.close()
 
     return True
+
+
+# Receivers per gr_xyz run; must not exceed ``nrp`` in fortran/axitra/param.inc
+AXITRA_MAX_RECEIVERS = 1000
+
+
+def Axitra_depth_chunk(chunk_id, model, z, receivers, npts_exp, elemse_start_origin,
+                       green_dir, gr_xyz_executable=None, elemse_executable=None):
+    """
+    Run ``gr_xyz`` and ``elemse`` once for many grid points at one source depth.
+
+    In a 1-D model the Green's functions only depend on the source-receiver
+    offset, so every (grid point, station) pair of a depth becomes one receiver
+    at its relative offset with the source at (0, 0, z). The output for one grid
+    point is then exactly the block of records the per-point run would write.
+
+    Parameters
+    ----------
+    chunk_id : str
+        Identifier of this run, also its working subdirectory name
+    model : str
+        Crustal model identifier, '' for the single-model case
+    z : str
+        Source depth [km] formatted as for the per-point run ('{:1.3f}')
+    receivers : list of tuple
+        Receiver offsets (north, east, depth) [km] relative to the source
+    npts_exp : int
+        Number of samples is ``2**npts_exp``
+    elemse_start_origin : float
+        Time between elementary seismogram start and origin time [s]
+    green_dir : str or path-like
+        Axitra workspace holding grdat, crustal and soutype files
+    gr_xyz_executable : str or path-like, optional
+        Path to ``gr_xyz``, by default the packaged one
+    elemse_executable : str or path-like, optional
+        Path to ``elemse``, by default the packaged one
+
+    Returns
+    -------
+    elemse_file : Path or None
+        Path to the elemse output (receivers in the given order), None on failure
+    message : str
+        Log text (empty when everything ran cleanly)
+    """
+    green_dir = Path(green_dir)
+    suffix = '-' + model if model else ''
+    work = green_dir / 'depth_runs' / chunk_id
+    work.mkdir(parents=True, exist_ok=True)
+    gr_xyz = Path(gr_xyz_executable) if gr_xyz_executable is not None else axitra_executable('gr_xyz')
+    elemse = Path(elemse_executable) if elemse_executable is not None else axitra_executable('elemse')
+
+    # same inputs as the per-point run, except the receiver list
+    for name in ('crustal' + suffix + '.dat', 'soutype.dat'):
+        (work / name).write_bytes((green_dir / name).read_bytes())
+    grdat = (green_dir / ('grdat' + suffix + '.hed')).read_text(encoding='utf-8')
+    grdat = re.sub(r'\bnr=\d+', 'nr={0:d}'.format(len(receivers)), grdat)
+    (work / ('grdat' + suffix + '.hed')).write_text(grdat, encoding='utf-8', newline='\n')
+    lines = [' Station co-ordinates', ' x(N>0,km),y(E>0,km),z(km),azim.,dist.,stat.']
+    lines += ['{0:10.4f} {1:10.4f} {2:10.4f} {3:10.4f} {4:10.4f} R ?'.format(x, y, zr, 0.0, 0.0) for x, y, zr in receivers]
+    (work / ('station' + suffix + '.dat')).write_text('\n'.join(lines) + '\n', encoding='utf-8', newline='\n')
+
+    message = ''
+    for attempt in range(2):
+        process = subprocess.run(
+            [str(gr_xyz), '0.000', '0.000', z, chunk_id, model],
+            capture_output=True, cwd=str(work),
+        )
+        if process.returncode == 0 and not process.stdout:
+            break
+        message = 'depth {0:s} km ({1:s}): gr_xyz failed (attempt {2:d}): {3:s}\n'.format(
+            z, chunk_id, attempt + 1, (process.stdout + process.stderr).decode(errors='replace').strip())
+    else:
+        return None, message
+    process = subprocess.run(
+        [str(elemse), str(npts_exp), chunk_id, '{0:8.3f}'.format(elemse_start_origin)],
+        capture_output=True, cwd=str(work),
+    )
+    # the big frequency-domain file is not needed once elemse has run
+    (work / ('gr' + chunk_id + '.hes')).unlink(missing_ok=True)
+    if process.returncode != 0 or process.stdout:
+        return None, message + 'depth {0:s} km ({1:s}): elemse FAILED: {2:s}\n'.format(
+            z, chunk_id, (process.stdout + process.stderr).decode(errors='replace').strip())
+    return work / ('elemse' + chunk_id + '.dat'), message

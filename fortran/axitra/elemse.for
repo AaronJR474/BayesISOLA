@@ -17,7 +17,7 @@ c
 
 	
       integer      nsp,nrp,ncp,ntp,nrtp,nrtp2,icc,ics,ifr
-      parameter    (nsp=1,ncp=200,nrp=101)
+      parameter    (nsp=1,ncp=200,nrp=1000)
       
 !       parameter   (nsp=1,ncp=200,nrp=31,ntp=8192,nrtp=nrp*ntp) ! JV
 
@@ -46,23 +46,6 @@ c     real        a(6)
       ntp=2**mm
       nrtp=nrp*ntp
       nrtp2=nrtp*6
-      allocate(iwk(ntp))
-      allocate(ux(ntp,nrp,6))
-      allocate(uy(ntp,nrp,6))
-      allocate(uz(ntp,nrp,6))
-
-c      data        ux,uy,uz/nrtp2*(0.,0.),nrtp2*(0.,0.),
-c     &                     nrtp2*(0.,0.)/
-
- 	do it=1,6	 ! for large 3D files the DAT statement cannot be used 
- 	do ir=1,nrp	 ! (compilation last long time or even cannot succssfully end)
- 	do itim=1,ntp  			   ! thn THIS initiation solves the problem
- 	ux(itim,ir,it)=(0.,0.)
- 	uy(itim,ir,it)=(0.,0.)
- 	uz(itim,ir,it)=(0.,0.)
-      enddo
-      enddo
-      enddo
  
       pi=3.1415926535
       pi2=2.*pi
@@ -91,6 +74,15 @@ cc    open(350,form='formatted',file='elemsef.dat') ! elem seis formated
        write(*,*) 'more than one source not allowed in this version'
        stop
       endif
+c     allocate for the nr receivers actually present (not nrp), so large
+c     receiver counts (one run per source depth) stay cheap in memory
+      allocate(iwk(ntp))
+      allocate(ux(ntp,nr,6))
+      allocate(uy(ntp,nr,6))
+      allocate(uz(ntp,nr,6))
+      ux=(0.,0.)
+      uy=(0.,0.)
+      uz=(0.,0.)
 
 c  true step
 c      ics=7   !true step
