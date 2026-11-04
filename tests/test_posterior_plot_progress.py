@@ -52,8 +52,10 @@ def _load_inverse_problem_module():
     fileformats = types.ModuleType("BayesISOLA.fileformats")
     fileformats.read_elemse = lambda *args, **kwargs: None
     fileformats.read_elemse_from_files = lambda *args, **kwargs: None
+    fileformats.read_elemse_array = lambda *args, **kwargs: None
     helpers = types.ModuleType("BayesISOLA.helpers")
     helpers.my_filter = lambda *args, **kwargs: None
+    helpers.filter_array = lambda *args, **kwargs: None
     mt_comps = types.ModuleType("BayesISOLA.MT_comps")
     mt_comps.decompose = lambda value: {}
     mt_comps.a2mt = lambda value: value

@@ -5,6 +5,7 @@ import multiprocessing as mp
 import numpy as np
 import os.path
 import hashlib
+import re
 from pathlib import Path
 from contextlib import nullcontext
 
@@ -30,6 +31,10 @@ def set_Greens_parameters(self):
 	#freq = int(math.ceil(fmax*tl))
 	#self.freq = min(int(math.ceil(self.fmax*self.tl))*2, self.npts_elemse/2) # pocitame 2x vic frekvenci, nez pak proleze filtrem, je to pak lepe srovnatelne se signalem, ktery je kauzalne filtrovany
 	self.freq = int(self.npts_elemse/2)+1
+	# optionally stop at gf_fmax_factor * fmax instead of Nyquist (data are prefiltered to the same band)
+	gf_fmax_factor = getattr(self, 'gf_fmax_factor', None)
+	if gf_fmax_factor:
+		self.freq = min(int(np.ceil(gf_fmax_factor*self.fmax*self.tl))+1, self.freq)
 	self.xl = max(np.ceil(self.d.stations[self.d.nr-1]['dist']/1000), 100)*1e3*20 # `xl` 20x vetsi nez nejvetsi epicentralni vzdalenost, zaokrouhlena nahoru na kilometry, minimalne 2000 km
 	self.log("\nGreen's function calculation:\n  npts: {0:4d}\n  tl: {1:4.2f}\n  freq: {2:4d}\n  npts for inversion: {3:4d}\n  source time function: {4:s}".format(self.npts_elemse, self.tl, self.freq, self.npts_slice, self.d.stf_description))
 
@@ -119,6 +124,152 @@ def verify_Greens_headers(self):
 			return False
 	return True
 
+# subdirectory of the Axitra workspace holding elemse files keyed by coordinates
+GREEN_CACHE_DIR = 'elemse_cache'
+
+def _grdat_path(self, model):
+	"""
+	Path of the Axitra grdat parameter file of a crustal model
+
+	Parameters
+	----------
+	model : str
+		Crustal model identifier, '' for the single-model case
+
+	Returns
+	-------
+	path : Path
+		Path to ``grdat.hed`` or ``grdat-<model>.hed``
+	"""
+	return Path(green_path(self.d.green_dir, 'grdat-' + model + '.hed' if model else 'grdat.hed'))
+
+def _green_signature(self):
+	"""
+	Hashes of the Axitra inputs shared by all grid points
+
+	Returns
+	-------
+	md5_crustal : str
+		md5 of ``crustal.dat``
+	md5_station : str
+		md5 of ``station.dat``
+	txt_soutype : str
+		Source time function description from ``soutype.dat``
+	"""
+	md5_crustal = hashlib.md5(Path(green_path(self.d.green_dir, 'crustal.dat')).read_bytes()).hexdigest()
+	md5_station = hashlib.md5(Path(green_path(self.d.green_dir, 'station.dat')).read_bytes()).hexdigest()
+	txt_soutype = Path(green_path(self.d.green_dir, 'soutype.dat')).read_text(encoding='utf-8').strip().replace('\n', '_')
+	return md5_crustal, md5_station, txt_soutype
+
+def _green_cache_key(grdat_text, metadata_text):
+	"""
+	Cache key of one elemse file: its Axitra parameters and point metadata
+
+	Parameters
+	----------
+	grdat_text : str
+		Content of the grdat file used for the computation
+	metadata_text : str
+		Content of the elemse metadata file (coordinates and input hashes)
+
+	Returns
+	-------
+	key : str
+		sha1 hex digest
+	"""
+	return hashlib.sha1((grdat_text + '|' + metadata_text).encode('utf-8')).hexdigest()
+
+def stash_reusable_Green(self):
+	"""
+	Move valid elemse files into a cache keyed by coordinates and parameters.
+
+	Grid point files are named by index, so a changed grid (e.g. an adaptive
+	expansion) would otherwise recompute every point. Files are only stashed when
+	they were computed with the current ``crustal.dat``, ``station.dat``,
+	``soutype.dat`` and after the current grdat file was written, so the key is
+	exact. :func:`calculate_Green` restores matching points instead of computing them.
+
+	Returns
+	-------
+	n_stashed : int
+		Number of elemse files moved into the cache
+	"""
+	green_dir = Path(self.d.green_dir)
+	try:
+		md5_crustal, md5_station, txt_soutype = _green_signature(self)
+	except OSError:
+		return 0
+	cache_dir = green_dir / GREEN_CACHE_DIR
+	n_stashed = 0
+	for model in self.d.models:
+		grdat = _grdat_path(self, model)
+		try:
+			grdat_text = grdat.read_text(encoding='utf-8')
+			grdat_mtime = grdat.stat().st_mtime
+		except OSError:
+			continue
+		pattern = re.compile(r'elemse\d+' + (re.escape('-' + model) if model else '') + r'\.txt')
+		for metadata in green_dir.iterdir():
+			if not pattern.fullmatch(metadata.name):
+				continue
+			payload = metadata.with_suffix('.dat')
+			try:
+				text = metadata.read_text(encoding='utf-8').strip()
+				fresh = payload.stat().st_size > 0 and payload.stat().st_mtime >= grdat_mtime
+			except (OSError, UnicodeError):
+				continue
+			fields = text.split()
+			if not fresh or len(fields) < 6 or fields[3:6] != [md5_crustal, md5_station, txt_soutype]:
+				continue
+			cache_dir.mkdir(exist_ok=True)
+			key = _green_cache_key(grdat_text, text)
+			os.replace(payload, cache_dir / (key + '.dat'))
+			os.replace(metadata, cache_dir / (key + '.txt'))
+			n_stashed += 1
+	return n_stashed
+
+def _restore_cached_Green(self, model):
+	"""
+	Restore cached elemse files for grid points whose coordinates match.
+
+	Parameters
+	----------
+	model : str
+		Crustal model identifier, '' for the single-model case
+
+	Returns
+	-------
+	todo : list of int
+		Indices of grid points that still have to be computed
+	"""
+	grid = self.grid.grid
+	cache_dir = Path(self.d.green_dir) / GREEN_CACHE_DIR
+	if not getattr(self, 'use_precalculated_Green', False) or not cache_dir.is_dir():
+		return list(range(len(grid)))
+	md5_crustal, md5_station, txt_soutype = _green_signature(self)
+	grdat_text = _grdat_path(self, model).read_text(encoding='utf-8')
+	suffix = '-' + model if model else ''
+	todo = []
+	for i, gp in enumerate(grid):
+		text = '{0:1.3f} {1:1.3f} {2:1.3f} {3:s} {4:s} {5:s}'.format(
+			gp['x']/1e3, gp['y']/1e3, gp['z']/1e3, md5_crustal, md5_station, txt_soutype
+		)
+		cached = cache_dir / (_green_cache_key(grdat_text, text) + '.dat')
+		if not cached.is_file():
+			todo.append(i)
+			continue
+		point_id = str(i).zfill(4) + suffix
+		for ext in ('.dat', '.txt'):
+			target = green_path(self.d.green_dir, 'elemse' + point_id + ext)
+			os.replace(cached.with_suffix(ext), target)
+			# valid for the current grdat, so mark as fresh for later stages
+			os.utime(target)
+	n_reused = len(grid) - len(todo)
+	if n_reused:
+		self.log("Reused Green's functions of {0:d} of {1:d} grid points{2:s} from earlier stages".format(
+			n_reused, len(grid), ' (model ' + model + ')' if model else ''))
+	return todo
+
 def calculate_or_verify_Green(self):
 	"""
 	If ``self.use_precalculated_Green`` is True, verifies whether the pre-calculated Green's functions were calculated on the same grid and with the same parameters (:func:`verify_Greens_headers` and :func:`verify_Greens_parameters`)
@@ -137,6 +288,8 @@ def calculate_or_verify_Green(self):
 		if differs:
 			if self.use_precalculated_Green == 'auto':
 				self.log('Shape or the grid or some parameters changed, calculating Gren\'s functions again...')
+				# keep points whose coordinates and parameters are unchanged
+				stash_reusable_Green(self)
 				self.write_Greens_parameters()
 				self.calculate_Green()
 			else:
@@ -160,19 +313,22 @@ def calculate_Green(self):
 	# run `gr_xyz` aand `elemse`
 	for model in self.d.models:
 		desc = "Green's functions" + (f" ({model})" if model else "")
+		todo = _restore_cached_Green(self, model)
+		if not todo:
+			continue
 		if self.threads > 1: # parallel
 			with mp.Pool(processes=self.threads) as pool:
-				progress_context = tqdm(total=len(grid), desc=desc, unit='pt') if show_progress else nullcontext()
+				progress_context = tqdm(total=len(todo), desc=desc, unit='pt') if show_progress else nullcontext()
 				with progress_context as bar:
 					callback = (lambda _: bar.update(1)) if bar is not None else None
-					results = [pool.apply_async(Axitra_wrapper, args=(i, model, grid[i]['x'], grid[i]['y'], grid[i]['z'], self.npts_exp, self.elemse_start_origin, logfile, green_dir, gr_xyz_executable, elemse_executable), callback=callback) for i in range(len(grid))]
+					results = [pool.apply_async(Axitra_wrapper, args=(i, model, grid[i]['x'], grid[i]['y'], grid[i]['z'], self.npts_exp, self.elemse_start_origin, logfile, green_dir, gr_xyz_executable, elemse_executable), callback=callback) for i in todo]
 					output = [p.get() for p in results]
-			for i in range (len(grid)):
-				if output[i] == False:
+			for i, ok in zip(todo, output):
+				if ok == False:
 					grid[i]['err'] = 1
 					grid[i]['VR'] = -10
 		else: # serial
-			indices = tqdm(range(len(grid)), desc=desc, unit='pt') if show_progress else range(len(grid))
+			indices = tqdm(todo, desc=desc, unit='pt') if show_progress else todo
 			for i in indices:
 				gp = grid[i]
 				ok = Axitra_wrapper(i, model, gp['x'], gp['y'], gp['z'], self.npts_exp, self.elemse_start_origin, logfile, green_dir, gr_xyz_executable, elemse_executable)

@@ -7,7 +7,6 @@ Function for reading synthetic waveforms and response files in various fileforma
 """
 
 import re # RegExp
-from scipy.io import FortranFile # fortran unformated (binary) files
 import numpy as np
 import os.path
 from obspy import Trace, Stream, read_inventory
@@ -78,51 +77,80 @@ def read_elemse(nr, npts, filename, stations, invert_displacement=False):
 	:return: elementary seismograms in form of list of lists of streams
 	"""
     
-	filename = os.fspath(filename)
-    
-	ff = {}
-	tr = Trace(data=np.empty(npts))
-	tr.stats.npts = npts
+	data, deltas = read_elemse_array(nr, npts, filename, stations)
 	elemse_all=[]
 	for r in range(nr):
-		model = stations[r]['model']
-		if model not in ff:
-			if model:
-				f = filename[0:filename.rfind('.')] + '-' + model + filename[filename.rfind('.'):]
-			else:
-				f = filename
-			ff[model] = FortranFile(f)
 		elemse=[]
 		for j in range(6):
-			f = {}
-			f['N'] = tr.copy()
-			f['E'] = tr.copy()
-			f['Z'] = tr.copy()
-
-			for i in range(npts):
-				t,N,E,Z = ff[model].read_reals('f')
-				f['N'].data[i] = N
-				f['E'].data[i] = E
-				f['Z'].data[i] = Z
-				if i == 0:
-					t1 = t
-				elif i == npts-1:
-					t2 = t
-			tl = t2-t1
-			samprate = (npts-1)/tl
-			delta = tl/(npts-1)
-			for comp in ['N', 'E', 'Z']:
-				f[comp].stats.channel = comp;
-				f[comp].stats.sampling_rate = samprate
-				f[comp].stats.delta = delta
-			st = Stream(traces=[f['Z'], f['N'], f['E']])
+			traces = []
+			for c, comp in enumerate(['Z', 'N', 'E']):
+				tr = Trace(data=data[r, j, c].copy())
+				tr.stats.channel = comp
+				tr.stats.delta = deltas[r, j]
+				traces.append(tr)
+			st = Stream(traces=traces)
 			if invert_displacement:
 				st.detrend('linear')
 				st.integrate()
 			elemse.append(st)
 		elemse_all.append(elemse)
-	del ff
 	return elemse_all
+
+# one Axitra elemse record: Fortran record markers around (t, N, E, Z) as float32
+_ELEMSE_RECORD = np.dtype([('head', '=i4'), ('t', '=f4'), ('N', '=f4'), ('E', '=f4'), ('Z', '=f4'), ('tail', '=i4')])
+
+def read_elemse_array(nr, npts, filename, stations):
+	"""
+	Read an Axitra elementary seismogram file straight into an array
+
+	Parameters
+	----------
+	nr : int
+		Number of receivers to read
+	npts : int
+		Number of samples of each component
+	filename : str or path-like
+		Path to the elemse file (a model suffix is added for multi-model runs)
+	stations : list of dict
+		``BayesISOLA.stations`` metadata of inverted stations
+
+	Returns
+	-------
+	data : np.ndarray
+		Elementary seismograms (float64), shape (nr, 6, 3, npts), components Z, N, E
+	deltas : np.ndarray
+		Sampling interval of each elementary seismogram, shape (nr, 6),
+		computed in float32 exactly as the original record-by-record reader
+	"""
+	filename = os.fspath(filename)
+	data = np.empty((nr, 6, 3, npts))
+	deltas = np.empty((nr, 6))
+	records = {}
+	used = {}
+	n_rec = 6 * npts
+	for r in range(nr):
+		model = stations[r]['model']
+		if model not in records:
+			if model:
+				f = filename[0:filename.rfind('.')] + '-' + model + filename[filename.rfind('.'):]
+			else:
+				f = filename
+			records[model] = np.fromfile(f, dtype=_ELEMSE_RECORD)
+			if np.any(records[model]['head'] != 16) or np.any(records[model]['tail'] != 16):
+				raise ValueError('Unexpected record layout in elemse file {0:s}'.format(f))
+			used[model] = 0
+		start = used[model]
+		rec = records[model][start:start+n_rec]
+		if len(rec) < n_rec:
+			raise ValueError('Elemse file for model {0!r} has fewer records than expected'.format(model))
+		used[model] += n_rec
+		rec = rec.reshape(6, npts)
+		for c, comp in enumerate(['Z', 'N', 'E']):
+			data[r, :, c, :] = rec[comp]
+		for j in range(6):
+			tl = rec['t'][j, npts-1] - rec['t'][j, 0]
+			deltas[r, j] = tl / (npts-1)
+	return data, deltas
 
 def attach_xml_paz(st, paz_file=None, inventory=None):
 	"""

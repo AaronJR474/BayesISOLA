@@ -44,7 +44,9 @@ def Axitra_wrapper(i, model, x, y, z, npts_exp, elemse_start_origin,
 
     Remark: because of paralelisation, this wrapper cannot be part of class :class:`BayesISOLA`.
     """
-    iter_max = 10
+    # gr_xyz is deterministic since its uninitialised `lastik` was fixed, so a
+    # single retry only covers transient I/O problems
+    iter_max = 2
     point_id = str(i).zfill(4)
     if model:
         point_id += '-' + model

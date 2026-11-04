@@ -9,14 +9,123 @@ import numpy as np
 
 from obspy import UTCDateTime
 
-from BayesISOLA.fileformats import read_elemse, read_elemse_from_files
-from BayesISOLA.helpers import my_filter
+from BayesISOLA.fileformats import read_elemse, read_elemse_array, read_elemse_from_files
+from BayesISOLA.helpers import filter_array, my_filter
 from BayesISOLA.MT_comps import decompose, a2mt
 from BayesISOLA._paths import green_path
 
 
 class InsufficientComponentsError(RuntimeError):
     """Raised when no usable waveform components remain for the inversion."""
+
+_COMPONENT_KEYS = (('useZ', 'weightZ'), ('useN', 'weightN'), ('useE', 'weightE'))
+
+
+def _round_away(number):
+    """
+    Round to the nearest integer, halves away from zero (as ObsPy's trim does).
+
+    Parameters
+    ----------
+    number : float
+        Value to round
+
+    Returns
+    -------
+    rounded : int
+        Rounded value
+    """
+    floor = np.floor(number)
+    ceil = np.ceil(number)
+    if (floor != ceil) and (abs(number - floor) == abs(ceil - number)):
+        return int(int(number) + int(np.sign(number)))
+    return int(np.round(number))
+
+
+def _read_filter_trim_elemse(nr, ne, npts_elemse, npts_slice, elemse_start_origin, stations, filename):
+    """
+    Read, filter and trim Axitra elementary seismograms as one array.
+
+    Array equivalent of ``read_elemse`` + ``my_filter`` + ``Stream.trim`` with
+    identical results, used by the inversion where it runs once per grid point.
+
+    Parameters
+    ----------
+    nr : int
+        Number of receivers
+    ne : int
+        Number of elementary seismograms used (5 deviatoric, 6 full)
+    npts_elemse : int
+        Number of samples in the elemse file
+    npts_slice : int
+        Number of samples used in the inversion
+    elemse_start_origin : float
+        Time between elemse start and the origin time [s], trimmed off when
+        ``npts_slice != npts_elemse``
+    stations : list of dict
+        ``BayesISOLA.stations`` metadata of inverted stations
+    filename : str or path-like
+        Path to the elemse file
+
+    Returns
+    -------
+    elemse_data : np.ndarray
+        Filtered seismograms, shape (nr, ne, 3, npts), components Z, N, E
+    """
+    data, deltas = read_elemse_array(nr, npts_elemse, filename, stations)
+    data = data[:, :ne]
+    # ObsPy derives the sampling rate from the stored delta
+    sampling_rates = 1.0 / deltas[:, :ne]
+
+    groups = {}
+    for r in range(nr):
+        for e in range(ne):
+            key = (stations[r]['fmin'], stations[r]['fmax'], float(sampling_rates[r, e]))
+            groups.setdefault(key, []).append((r, e))
+    for (fmin, fmax, df), members in groups.items():
+        rows, cols = zip(*members)
+        data[rows, cols] = filter_array(data[rows, cols], df, fmin, fmax)
+
+    if npts_slice == npts_elemse:
+        return data
+
+    # same start sample as Trace.trim(starttime) with nearest_sample=True
+    offset_s = (UTCDateTime(0) + elemse_start_origin) - UTCDateTime(0)
+    out = np.empty((nr, ne, 3, npts_slice))
+    for r in range(nr):
+        for e in range(ne):
+            i0 = max(int(_round_away(offset_s * sampling_rates[r, e])), 0)
+            out[r, e] = data[r, e, :, i0:i0+npts_slice]
+    return out
+
+
+def _design_matrix(elemse_data, stations, npts):
+    """
+    Assemble the weighted design matrix G from elementary seismograms.
+
+    Parameters
+    ----------
+    elemse_data : np.ndarray
+        Elementary seismograms, shape (nr, ne, 3, >= npts), components Z, N, E
+    stations : list of dict
+        ``BayesISOLA.stations`` metadata with use/weight flags per component
+    npts : int
+        Number of samples per component
+
+    Returns
+    -------
+    G : np.ndarray
+        Design matrix, shape (comps * npts, ne), stations then Z, N, E blocks
+    """
+    blocks = []
+    for r, stn in enumerate(stations[:elemse_data.shape[0]]):
+        for comp, (use_key, weight_key) in enumerate(_COMPONENT_KEYS):
+            if stn[use_key]:
+                blocks.append(elemse_data[r, :, comp, :npts].T * stn[weight_key])
+    if not blocks:
+        return np.empty((0, elemse_data.shape[1]))
+    # C order keeps BLAS summation order (and results) identical to the original loop
+    return np.ascontiguousarray(np.concatenate(blocks, axis=0))
 
 def _covariance_determinant_metrics(matrix):
     """Return a finite-log determinant and a backward-compatible determinant.
@@ -162,39 +271,41 @@ def invert(point_id, d_shifts, norm_d, Cd_inv, Cd_inv_shifts, nr, comps, station
             "retrying.".format(point_id=point_id, ne=ne)
         )
 
-    if elemse_path:
-        elemse = read_elemse_from_files(
-            nr, elemse_path, stations, origin_time, samprate,
-            npts_elemse, invert_displacement,
-        )
+    npts = npts_slice if npts_slice != npts_elemse else npts_elemse
+
+    if elemse_path or invert_displacement:
+        if elemse_path:
+            elemse = read_elemse_from_files(
+                nr, elemse_path, stations, origin_time, samprate,
+                npts_elemse, invert_displacement,
+            )
+        else:
+            elemse = read_elemse(
+                nr, npts_elemse, green_path(green_dir if green_dir is not None else 'green', 'elemse'+point_id+'.dat'),
+                stations, invert_displacement,
+            )
+
+        for r in range(nr):
+            for i in range(ne):
+                my_filter(elemse[r][i], stations[r]['fmin'], stations[r]['fmax'])
+
+        if npts_slice != npts_elemse:
+            for st6 in elemse:
+                for st in st6:
+                    st.trim(UTCDateTime(0)+elemse_start_origin)
+
+        elemse_data = np.empty((nr, ne, 3, npts))
+        for r in range(nr):
+            for e in range(ne):
+                for comp in range(3):
+                    elemse_data[r, e, comp] = elemse[r][e][comp].data[:npts]
     else:
-        elemse = read_elemse(
-            nr, npts_elemse, green_path(green_dir if green_dir is not None else 'green', 'elemse'+point_id+'.dat'),
-            stations, invert_displacement,
+        elemse_data = _read_filter_trim_elemse(
+            nr, ne, npts_elemse, npts_slice, elemse_start_origin, stations,
+            green_path(green_dir if green_dir is not None else 'green', 'elemse'+point_id+'.dat'),
         )
 
-    for r in range(nr):
-        for i in range(ne):
-            my_filter(elemse[r][i], stations[r]['fmin'], stations[r]['fmax'])
-
-    if npts_slice != npts_elemse:
-        for st6 in elemse:
-            for st in st6:
-                st.trim(UTCDateTime(0)+elemse_start_origin)
-        npts = npts_slice
-    else:
-        npts = npts_elemse
-
-    c = 0
-    G = np.empty((comps*npts, ne))
-    for r in range(nr):
-        for comp in range(3):
-            if stations[r][{0:'useZ', 1:'useN', 2:'useE'}[comp]]:
-                weight = stations[r][{0:'weightZ', 1:'weightN', 2:'weightE'}[comp]]
-                for i in range(npts):
-                    for e in range(ne):
-                        G[c*npts+i, e] = elemse[r][e][comp].data[i] * weight
-                c += 1
+    G = _design_matrix(elemse_data, stations, npts)
 
     factorized = bool(covariance_factors) and not Cd_inv_shifts
     station_normal = None

@@ -105,6 +105,8 @@ c++++++++++
       freq=-dfreq
       pil=pi2/xl
       iklast=0
+c     lastik was read uninitialised in the first frequency (garbage at -O2)
+      lastik=0
 
       call initdata
 
