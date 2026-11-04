@@ -17,7 +17,8 @@ except ImportError:
 	tqdm = None
 
 from BayesISOLA.axitra import AXITRA_MAX_RECEIVERS, Axitra_depth_chunk, Axitra_wrapper
-from BayesISOLA.fileformats import ELEMSE_RECORD
+from BayesISOLA.gf_table import GreenTable, table_axes
+from BayesISOLA.gf_store import GreenStore, axitra_parameter_hash, format_receiver, receiver_key
 import BayesISOLA.syngine
 from BayesISOLA._paths import axitra_executable, green_path
 
@@ -39,6 +40,10 @@ def set_Greens_parameters(self):
 	if gf_fmax_factor:
 		self.freq = min(int(np.ceil(gf_fmax_factor*self.fmax*self.tl))+1, self.freq)
 	self.xl = max(np.ceil(self.d.stations[self.d.nr-1]['dist']/1000), 100)*1e3*20 # `xl` 20x vetsi nez nejvetsi epicentralni vzdalenost, zaokrouhlena nahoru na kilometry, minimalne 2000 km
+	# optional event-wide xl, so runs with fewer (closer) stations can reuse stored Green's functions
+	gf_xl_km = getattr(self, 'gf_xl_km', None)
+	if gf_xl_km:
+		self.xl = max(self.xl, float(gf_xl_km) * 1e3)
 	self.log("\nGreen's function calculation:\n  npts: {0:4d}\n  tl: {1:4.2f}\n  freq: {2:4d}\n  npts for inversion: {3:4d}\n  source time function: {4:s}".format(self.npts_elemse, self.tl, self.freq, self.npts_slice, self.d.stf_description))
 
 def write_Greens_parameters(self):
@@ -126,6 +131,9 @@ def verify_Greens_headers(self):
 			print(desc)
 			return False
 	return True
+
+# fewest receivers worth one Axitra run (each run has a fixed cost)
+MIN_RECEIVERS_PER_RUN = 200
 
 # subdirectory of the Axitra workspace holding elemse files keyed by coordinates
 GREEN_CACHE_DIR = 'elemse_cache'
@@ -324,6 +332,9 @@ def calculate_Green(self):
 		todo = _restore_cached_Green(self, model)
 		if not todo:
 			continue
+		if getattr(self, 'gf_table', None) is not None:
+			_calculate_Green_from_table(self, model, todo, gr_xyz_executable, elemse_executable)
+			continue
 		if getattr(self, 'gf_bundle_depths', True) and self.d.models[model] <= AXITRA_MAX_RECEIVERS:
 			_calculate_Green_by_depth(self, model, todo, logfile, gr_xyz_executable, elemse_executable, desc, show_progress)
 			continue
@@ -347,38 +358,32 @@ def calculate_Green(self):
 					gp['err'] = 1
 					gp['VR'] = -10
 
-def _depth_chunks(self, model, todo):
+def _receiver_chunks(missing, threads):
 	"""
-	Group grid points by source depth and split them into balanced Axitra runs.
+	Split receivers to compute into balanced Axitra runs, one source depth per run.
 
 	Parameters
 	----------
-	model : str
-		Crustal model identifier, '' for the single-model case
-	todo : list of int
-		Indices of grid points to compute
+	missing : dict
+		Source depth string -> list of (key, formatted offset) to compute
+	threads : int
+		Number of parallel processes
 
 	Returns
 	-------
 	chunks : list of tuple
-		(depth string as passed to gr_xyz, list of grid point indices), shallow
-		depths first as they are the most expensive
+		(depth string, list of (key, offset)), shallow depths first as they are
+		the most expensive
 	"""
-	grid = self.grid.grid
-	nr = self.d.models[model]
-	by_depth = {}
-	for i in todo:
-		by_depth.setdefault('{0:1.3f}'.format(grid[i]['z']/1e3), []).append(i)
-	# enough runs to keep every process busy, but few receivers per run cost little
-	max_points = max(1, AXITRA_MAX_RECEIVERS // max(nr, 1))
-	target_points = max(1, math.ceil(len(todo) / (2 * max(int(self.threads), 1))))
-	points_per_run = min(max_points, target_points)
+	total = sum(len(receivers) for receivers in missing.values())
+	# enough runs to keep every process busy, but each run has a fixed cost
+	per_run = min(AXITRA_MAX_RECEIVERS, max(MIN_RECEIVERS_PER_RUN, math.ceil(total / (2 * max(int(threads), 1)))))
 	chunks = []
-	for z in sorted(by_depth, key=float):
-		indices = by_depth[z]
-		size = math.ceil(len(indices) / math.ceil(len(indices) / points_per_run))
-		for start in range(0, len(indices), size):
-			chunks.append((z, indices[start:start+size]))
+	for z in sorted(missing, key=float):
+		receivers = missing[z]
+		size = math.ceil(len(receivers) / math.ceil(len(receivers) / per_run))
+		for start in range(0, len(receivers), size):
+			chunks.append((z, receivers[start:start+size]))
 	return chunks
 
 def _station_coordinates(self, model):
@@ -400,13 +405,29 @@ def _station_coordinates(self, model):
 	nr = self.d.models[model]
 	return [tuple(float(v) for v in line.split()[:3]) for line in lines[:nr]]
 
+def _green_store(self):
+	"""
+	Receiver-level Green's function store of this run
+
+	Returns
+	-------
+	store : GreenStore
+		``self.gf_store_dir`` when set (e.g. shared by all runs of an event),
+		otherwise ``<green_dir>/gf_store``
+	"""
+	root = getattr(self, 'gf_store_dir', None) or Path(self.d.green_dir) / 'gf_store'
+	return GreenStore(root)
+
 def _calculate_Green_by_depth(self, model, todo, logfile, gr_xyz_executable, elemse_executable, desc, show_progress):
 	"""
 	Compute elemse files with one Axitra run per source depth (or chunk of it).
 
 	Each grid point's receivers are its station offsets, so the records written
-	for it are those of the per-point calculation: the per-point elemse files and
-	metadata are written exactly as :func:`Axitra_wrapper` writes them.
+	for it are those of the per-point calculation. Receivers already in the
+	Green's function store (same model, parameters, depth and offset, e.g. from
+	an earlier adaptive stage or another run of the same event) are reused, only
+	the missing ones are computed. The per-point elemse files and metadata are
+	written exactly as :func:`Axitra_wrapper` writes them.
 
 	Parameters
 	----------
@@ -427,56 +448,126 @@ def _calculate_Green_by_depth(self, model, todo, logfile, gr_xyz_executable, ele
 	green_dir = Path(self.d.green_dir)
 	suffix = '-' + model if model else ''
 	stations = _station_coordinates(self, model)
-	nr = len(stations)
 	npts = 2 ** self.npts_exp
 	md5_crustal, md5_station, txt_soutype = _green_signature(self)
-	chunks = _depth_chunks(self, model, todo)
+	store = _green_store(self)
+	param_hash = axitra_parameter_hash(green_dir, model, self.npts_exp, self.elemse_start_origin)
+	index = store.index()
 
+	# receivers of every grid point, and those not in the store yet
+	point_keys = {}
+	missing = {}
+	queued = set()
+	for i in todo:
+		# source position as written for the per-point gr_xyz run
+		xs = float('{0:1.3f}'.format(grid[i]['x']/1e3))
+		ys = float('{0:1.3f}'.format(grid[i]['y']/1e3))
+		z = '{0:1.3f}'.format(grid[i]['z']/1e3)
+		keys = []
+		for sx, sy, sz in stations:
+			offset = format_receiver(sx - xs, sy - ys, sz)
+			key = receiver_key(param_hash, z, offset)
+			keys.append(key)
+			if key not in index and key not in queued:
+				queued.add(key)
+				missing.setdefault(z, []).append((key, offset))
+		point_keys[i] = keys
+	n_receivers = len(todo) * len(stations)
+	self.log("Green's functions{0:s}: {1:d} of {2:d} receivers found in the store, {3:d} to compute".format(
+		' (model ' + model + ')' if model else '', n_receivers - len(queued), n_receivers, len(queued)))
+
+	chunks = _receiver_chunks(missing, self.threads)
 	tasks = []
-	for c, (z, indices) in enumerate(chunks):
-		receivers = []
-		for i in indices:
-			# source position as written for the per-point gr_xyz run
-			xs = float('{0:1.3f}'.format(grid[i]['x']/1e3))
-			ys = float('{0:1.3f}'.format(grid[i]['y']/1e3))
-			receivers += [(sx - xs, sy - ys, sz) for sx, sy, sz in stations]
+	for c, (z, receivers) in enumerate(chunks):
 		chunk_id = 'd' + str(c).zfill(4)
-		tasks.append((chunk_id, model, z, receivers, self.npts_exp, self.elemse_start_origin, str(green_dir), gr_xyz_executable, elemse_executable))
+		offsets = [tuple(float(v) for v in offset) for _, offset in receivers]
+		tasks.append((chunk_id, model, z, offsets, self.npts_exp, self.elemse_start_origin, str(green_dir), gr_xyz_executable, elemse_executable))
 
 	log = open(logfile, 'a', encoding='utf-8', newline='\n')
-	progress_context = tqdm(total=len(todo), desc=desc, unit='pt') if show_progress else nullcontext()
-	pool_context = mp.Pool(processes=int(self.threads)) if self.threads > 1 else nullcontext()
+	failed = set()
+	progress_context = tqdm(total=len(queued), desc=desc, unit='receiver') if show_progress and queued else nullcontext()
+	pool_context = mp.Pool(processes=int(self.threads)) if self.threads > 1 and len(tasks) > 1 else nullcontext()
 	with progress_context as bar, pool_context as pool:
 		pending = [pool.apply_async(Axitra_depth_chunk, args=task) for task in tasks] if pool is not None else None
-		for k, ((z, indices), task) in enumerate(zip(chunks, tasks)):
+		for k, ((z, receivers), task) in enumerate(zip(chunks, tasks)):
 			elemse_file, message = pending[k].get() if pending is not None else Axitra_depth_chunk(*task)
 			if message:
 				log.write(message)
-			records = None
-			if elemse_file is not None:
-				records = np.fromfile(elemse_file, dtype=ELEMSE_RECORD)
-				if len(records) != len(indices) * nr * 6 * npts:
-					log.write('depth {0:s} km ({1:s}): elemse wrote {2:d} records, expected {3:d}\n'.format(
-						z, task[0], len(records), len(indices) * nr * 6 * npts))
-					records = None
-			if records is None:
-				for i in indices:
-					grid[i]['err'] = 1
-					grid[i]['VR'] = -10
+			keys = [key for key, _ in receivers]
+			if elemse_file is not None and store.add(elemse_file, keys, npts):
+				log.write('depth {0:s} km ({1:s}): {2:d} receivers\n'.format(z, task[0], len(keys)))
 			else:
-				# split into the per-point files, byte-identical record layout
-				records = records.reshape(len(indices), nr * 6 * npts)
-				for k, i in enumerate(indices):
-					point_id = str(i).zfill(4) + suffix
-					records[k].tofile(green_path(green_dir, 'elemse' + point_id + '.dat'))
-					with open(green_path(green_dir, 'elemse' + point_id + '.txt'), 'w', encoding='utf-8', newline='\n') as meta:
-						meta.write('{0:1.3f} {1:1.3f} {2:1.3f} {3:s} {4:s} {5:s}'.format(
-							grid[i]['x']/1e3, grid[i]['y']/1e3, grid[i]['z']/1e3, md5_crustal, md5_station, txt_soutype))
-				log.write('depth {0:s} km ({1:s}): {2:d} grid points, {3:d} receivers\n'.format(z, task[0], len(indices), len(indices) * nr))
+				log.write('depth {0:s} km ({1:s}): no usable elemse output for {2:d} receivers\n'.format(z, task[0], len(keys)))
+				failed.update(keys)
 			shutil.rmtree(green_dir / 'depth_runs' / task[0], ignore_errors=True)
 			if bar is not None:
-				bar.update(len(indices))
+				bar.update(len(keys))
 	log.close()
+
+	# per-point files, byte-identical record layout to a per-point elemse run
+	index = store.index()
+	for i in todo:
+		keys = point_keys[i]
+		if any(key in failed or key not in index for key in keys):
+			grid[i]['err'] = 1
+			grid[i]['VR'] = -10
+			continue
+		point_id = str(i).zfill(4) + suffix
+		store.elemse_records(keys).tofile(green_path(green_dir, 'elemse' + point_id + '.dat'))
+		with open(green_path(green_dir, 'elemse' + point_id + '.txt'), 'w', encoding='utf-8', newline='\n') as meta:
+			meta.write('{0:1.3f} {1:1.3f} {2:1.3f} {3:s} {4:s} {5:s}'.format(
+				grid[i]['x']/1e3, grid[i]['y']/1e3, grid[i]['z']/1e3, md5_crustal, md5_station, txt_soutype))
+
+def _calculate_Green_from_table(self, model, todo, gr_xyz_executable, elemse_executable):
+	"""
+	Write elemse files interpolated from a (depth, distance) Green's function table.
+
+	``self.gf_table`` is a :class:`~BayesISOLA.gf_table.GreenTable`, a path to a
+	saved table, or ``{'distance_step_km': step}`` to build a table for this run
+	(its depths, distances up to the farthest receiver) before interpolating.
+	The table must have been computed with the same Axitra inputs. Distance
+	(and depth) interpolation is an approximation; the azimuth is exact.
+
+	Parameters
+	----------
+	model : str
+		Crustal model identifier, '' for the single-model case
+	todo : list of int
+		Indices of grid points to compute
+	gr_xyz_executable, elemse_executable : str
+		Paths to the Axitra executables (to build a table)
+	"""
+	grid = self.grid.grid
+	green_dir = Path(self.d.green_dir)
+	suffix = '-' + model if model else ''
+	stations = np.array(_station_coordinates(self, model))
+	md5_crustal, md5_station, txt_soutype = _green_signature(self)
+	param_hash = axitra_parameter_hash(green_dir, model, self.npts_exp, self.elemse_start_origin)
+
+	sources = {i: (float('{0:1.3f}'.format(grid[i]['x']/1e3)), float('{0:1.3f}'.format(grid[i]['y']/1e3)), grid[i]['z']/1e3) for i in todo}
+	table = self.gf_table
+	if isinstance(table, dict):
+		depths = sorted({z for _, _, z in sources.values()})
+		distances = [np.hypot(stations[:, 0] - xs, stations[:, 1] - ys) for xs, ys, _ in sources.values()]
+		depth_strings, distance_axis = table_axes(
+			depths, max(d.max() for d in distances), float(table['distance_step_km']), min(d.min() for d in distances))
+		self.log("Green's function table: {0:d} depths x {1:d} distances ({2:.3g} km spacing)".format(
+			len(depth_strings), len(distance_axis), float(table['distance_step_km'])))
+		table = GreenTable.build(green_dir, model, depth_strings, distance_axis, self.npts_exp, self.elemse_start_origin,
+								 param_hash, threads=self.threads, gr_xyz_executable=gr_xyz_executable,
+								 elemse_executable=elemse_executable)
+	elif not isinstance(table, GreenTable):
+		table = GreenTable.load(table)
+	if table.param_hash != param_hash:
+		raise ValueError("The Green's function table was computed with different Axitra inputs (model, parameters or sampling)")
+
+	for i, (xs, ys, z) in sources.items():
+		offsets = np.column_stack([stations[:, 0] - xs, stations[:, 1] - ys])
+		point_id = str(i).zfill(4) + suffix
+		table.elemse_records(z, offsets).tofile(green_path(green_dir, 'elemse' + point_id + '.dat'))
+		with open(green_path(green_dir, 'elemse' + point_id + '.txt'), 'w', encoding='utf-8', newline='\n') as meta:
+			meta.write('{0:1.3f} {1:1.3f} {2:1.3f} {3:s} {4:s} {5:s}'.format(
+				grid[i]['x']/1e3, grid[i]['y']/1e3, grid[i]['z']/1e3, md5_crustal, md5_station, txt_soutype))
 
 def use_elemse_from_files(self, path):
 	"""

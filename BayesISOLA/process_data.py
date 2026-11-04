@@ -38,6 +38,12 @@ class process_data:
     :type decimate_shift: bool, optional
     :param gf_bundle_depths: if ``True`` (default), run Axitra once per source depth with all grid point/station offsets as receivers instead of once per grid point (same elementary seismograms, much faster)
     :type gf_bundle_depths: bool, optional
+    :param gf_store_dir: directory of the receiver-level Green's function store; share it between runs of the same event so identical receivers are computed once (default ``<green_dir>/gf_store``)
+    :type gf_store_dir: str or path-like, optional
+    :param gf_table: interpolate elementary seismograms from a (depth, distance) Green's function table instead of computing every receiver: a :class:`~BayesISOLA.gf_table.GreenTable`, a path to a saved table, or ``{'distance_step_km': step}`` to build one for this run; ``None`` (default) computes exact Green's functions
+    :type gf_table: GreenTable, str or dict, optional
+    :param gf_xl_km: if set, Axitra spatial periodicity ``xl`` is at least this value [km] instead of 20 times the farthest station distance; give all runs of an event the same value so station subsets reuse stored Green's functions (changes results slightly)
+    :type gf_xl_km: float, optional
     :param gf_fmax_factor: if set, compute Green's functions only up to ``gf_fmax_factor * fmax`` instead of the Nyquist frequency (data are prefiltered to the same band); ``None`` keeps the original behaviour
     :type gf_fmax_factor: float, optional
 
@@ -87,7 +93,7 @@ class process_data:
 	from BayesISOLA._parameters import set_frequencies, set_working_sampling, count_components, min_time, max_time, set_time_window, set_parameters, skip_short_records
 	from BayesISOLA._process_data import correct_data, trim_filter_data, decimate_shift
 
-	def __init__(self, data, grid, s_velocity=3000, velocity_ot_the_fastest_wave=8000, velocity_ot_the_slowest_wave = 1000, threads=2, invert_displacement=False, use_precalculated_Green=False, correct_data=True, set_parameters=True, fmax=1., fmin=0., min_depth=1000., skip_short_records=False, calculate_or_verify_Green=True, trim_filter_data=True, decimate_shift=True, progress=True, gf_fmax_factor=None, gf_bundle_depths=True):
+	def __init__(self, data, grid, s_velocity=3000, velocity_ot_the_fastest_wave=8000, velocity_ot_the_slowest_wave = 1000, threads=2, invert_displacement=False, use_precalculated_Green=False, correct_data=True, set_parameters=True, fmax=1., fmin=0., min_depth=1000., skip_short_records=False, calculate_or_verify_Green=True, trim_filter_data=True, decimate_shift=True, progress=True, gf_fmax_factor=None, gf_bundle_depths=True, gf_store_dir=None, gf_table=None, gf_xl_km=None):
 		self.d = data
 		self.grid = grid
 		self.s_velocity = s_velocity
@@ -99,6 +105,9 @@ class process_data:
 		self.use_precalculated_Green = use_precalculated_Green
 		self.gf_fmax_factor = gf_fmax_factor
 		self.gf_bundle_depths = bool(gf_bundle_depths)
+		self.gf_store_dir = gf_store_dir
+		self.gf_table = gf_table
+		self.gf_xl_km = gf_xl_km
 		self.data = []
 		self.noise = []
 		self.fmax = 0.

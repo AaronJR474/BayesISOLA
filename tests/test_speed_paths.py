@@ -156,3 +156,100 @@ def test_depth_bundled_axitra_matches_per_point(tmp_path):
     for name, reference in outputs[False].items():
         scale = np.max(np.abs(reference))
         assert np.max(np.abs(outputs[True][name] - reference)) / scale < 1e-5, name
+
+
+def test_green_store_round_trip_is_byte_identical(tmp_path):
+    """Records assembled from the store equal the elemse file they came from."""
+    from BayesISOLA.gf_store import GreenStore
+
+    npts, n_recv = 32, 3
+    data = np.random.default_rng(3).standard_normal((n_recv, 6, 3, npts)).astype(np.float32)
+    path = tmp_path / "elemse_chunk.dat"
+    _write_elemse(path, data, 1.5)
+    store = GreenStore(tmp_path / "store")
+    keys = [f"k{i}" for i in range(n_recv)]
+    assert store.add(path, keys, npts)
+    store.index()
+    assert store.elemse_records(keys).tobytes() == path.read_bytes()
+    # a subset in another order is the matching receiver blocks
+    reordered = store.elemse_records(["k2", "k0"]).tobytes()
+    block = 6 * npts * 24
+    raw = path.read_bytes()
+    assert reordered == raw[2 * block:3 * block] + raw[0:block]
+
+
+def test_shared_green_store_skips_axitra_for_known_receivers(tmp_path):
+    """A second run sharing the store computes no receivers and writes identical elemse files."""
+    import pytest
+
+    import BayesISOLA
+    from BayesISOLA._paths import axitra_executable
+
+    try:
+        axitra_executable("gr_xyz")
+    except FileNotFoundError:
+        pytest.skip("Axitra executables are not installed in this source environment.")
+
+    example = Path(__file__).resolve().parents[1] / "examples" / "input" / "example_2_SAC"
+    store_dir = tmp_path / "shared_store"
+    outputs = []
+    for run in range(2):
+        inputs = BayesISOLA.load_data(outdir=tmp_path / f"run{run}")
+        inputs.read_event_info(str(example / "event.isl"))
+        inputs.set_source_time_function("triangle", 2.0)
+        inputs.read_network_coordinates(str(example / "network.stn"))
+        inputs.read_crust(str(example / "crustal.dat"))
+        inputs.load_files(str(example / "sac"), separator="", pz_dir=str(example / "pzfiles"),
+                          pz_separator="", pz_suffix=".pz")
+        grid = BayesISOLA.grid(inputs, location_unc=1000, depth_unc=1000, time_unc=1, step_x=1000,
+                               step_z=1000, max_points=8, circle_shape=True, rupture_velocity=1000)
+        BayesISOLA.process_data(inputs, grid, threads=1, use_precalculated_Green=False, fmax=0.15,
+                                fmin=0.02, progress=False, gf_store_dir=store_dir)
+        outputs.append({f.name: f.read_bytes() for f in sorted(Path(inputs.green_dir).glob("elemse????.dat"))})
+        if run == 1:
+            # no Axitra run was logged: every receiver came from the store
+            assert "receivers" not in (Path(inputs.outdir) / "log_green.txt").read_text()
+    assert outputs[0] == outputs[1]
+
+
+def test_table_rotation_matches_axitra_at_any_azimuth(tmp_path):
+    """Elementary seismograms rotated from azimuth 0 equal Axitra run at the true azimuth."""
+    import pytest
+
+    import BayesISOLA
+    from BayesISOLA._paths import axitra_executable
+    from BayesISOLA.axitra import Axitra_depth_chunk
+    from BayesISOLA.fileformats import ELEMSE_RECORD
+    from BayesISOLA.gf_table import rotate_from_azimuth_zero
+
+    try:
+        axitra_executable("gr_xyz")
+    except FileNotFoundError:
+        pytest.skip("Axitra executables are not installed in this source environment.")
+
+    example = Path(__file__).resolve().parents[1] / "examples" / "input" / "example_2_SAC"
+    inputs = BayesISOLA.load_data(outdir=tmp_path / "out")
+    inputs.read_event_info(str(example / "event.isl"))
+    inputs.set_source_time_function("triangle", 2.0)
+    inputs.read_network_coordinates(str(example / "network.stn"))
+    inputs.read_crust(str(example / "crustal.dat"))
+    inputs.load_files(str(example / "sac"), separator="", pz_dir=str(example / "pzfiles"),
+                      pz_separator="", pz_suffix=".pz")
+    grid = BayesISOLA.grid(inputs, location_unc=0, depth_unc=0, time_unc=1, step_x=1000, step_z=1000,
+                           max_points=1, circle_shape=True, rupture_velocity=1000)
+    data = BayesISOLA.process_data(inputs, grid, threads=1, use_precalculated_Green=False, fmax=0.15,
+                                   fmin=0.02, progress=False)
+
+    distance = 37.5
+    azimuths = np.radians([0.0, 33.0, 90.0, 147.0, 211.0, 300.0])
+    receivers = [(distance * np.cos(a), distance * np.sin(a), 0.0) for a in azimuths] + [(distance, 0.0, 0.0)]
+    elemse_file, message = Axitra_depth_chunk("rot", "", "8.000", receivers, data.npts_exp,
+                                              data.elemse_start_origin, inputs.green_dir)
+    assert elemse_file is not None, message
+    npts = 2 ** data.npts_exp
+    records = np.fromfile(elemse_file, dtype=ELEMSE_RECORD).reshape(len(receivers), 6, npts)
+    g = np.stack([records["N"], records["E"], records["Z"]], axis=-1).astype(float)
+    rotated = rotate_from_azimuth_zero(np.repeat(g[-1:], len(azimuths), axis=0), azimuths)
+    scale = np.max(np.abs(g[:-1]))
+    # exact at 0 and 90 degrees; elsewhere ~1e-5 from rounding receiver coordinates to 0.1 m
+    assert np.max(np.abs(rotated - g[:-1])) / scale < 5e-5

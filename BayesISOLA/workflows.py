@@ -3016,28 +3016,52 @@ def suggest_depth_limits(
     }
 
 
-def _grid_boundary_flags(grid, gp: Mapping[str, Any]) -> dict[str, bool]:
+def _grid_boundary_context(grid) -> dict[str, Any]:
+    """Grid-wide values used by :func:`_grid_boundary_flags`.
+
+    Computing them once and passing them to every per-point call keeps loops
+    over the grid linear instead of quadratic.
+    """
+    depths = sorted({float(point["z"]) for point in grid.grid if not point.get("err")})
+    step_x = float(grid.step_x)
+    radius = float(grid.radius)
+    n_steps = int(radius / step_x) if step_x > 0 else 0
+    xy = {(float(point["x"]), float(point["y"])) for point in grid.grid if not point.get("err")}
+    return {
+        "has_depths": bool(depths),
+        "depth_lo": depths[0] if depths else np.nan,
+        "depth_hi": depths[-1] if depths else np.nan,
+        "step_x": step_x,
+        "radius": radius,
+        "n_steps": n_steps,
+        "horizontal_fixed": len(xy) <= 1 or radius <= 0.0 or n_steps <= 0,
+    }
+
+
+def _grid_boundary_flags(grid, gp: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, bool]:
     """Return dimension-specific boundary flags for one spatial grid point.
 
     Native BayesISOLA stores depth and horizontal boundaries in one ``edge``
     boolean.  A one-point horizontal grid (radius/steps equal to zero) is a
     deliberate fixed-XY constraint, not a horizontal boundary failure.
+    ``context`` is :func:`_grid_boundary_context` of ``grid``, computed here
+    when not given.
     """
-    depths = sorted({float(point["z"]) for point in grid.grid if not point.get("err")})
-    depth_lo = depths[0] if depths else np.nan
-    depth_hi = depths[-1] if depths else np.nan
-    step_x = float(grid.step_x)
-    radius = float(grid.radius)
-    n_steps = int(radius / step_x) if step_x > 0 else 0
-
-    xy = {(float(point["x"]), float(point["y"])) for point in grid.grid if not point.get("err")}
-    horizontal_fixed = len(xy) <= 1 or radius <= 0.0 or n_steps <= 0
+    if context is None:
+        context = _grid_boundary_context(grid)
+    has_depths = context["has_depths"]
+    depth_lo = context["depth_lo"]
+    depth_hi = context["depth_hi"]
+    step_x = context["step_x"]
+    radius = context["radius"]
+    n_steps = context["n_steps"]
+    horizontal_fixed = context["horizontal_fixed"]
 
     z = float(gp["z"])
     x = float(gp["x"])
     y = float(gp["y"])
-    depth_floor = bool(depths) and np.isclose(z, depth_lo)
-    depth_ceiling = bool(depths) and np.isclose(z, depth_hi)
+    depth_floor = has_depths and np.isclose(z, depth_lo)
+    depth_ceiling = has_depths and np.isclose(z, depth_hi)
 
     horizontal = False
     north = south = east = west = False
@@ -3132,8 +3156,9 @@ def diagnose_grid_edge(grid, centroid: dict[str, Any] | None = None) -> dict[str
             reasons.append(f"depth at grid ceiling ({depth_hi / 1e3:.3f} km)")
         report["centroid_edge_reasons"] = reasons
     else:
+        context = _grid_boundary_context(grid)
         report["n_edge_points"] = sum(
-            _grid_boundary_flags(grid, gp)["on_active_spatial_boundary"]
+            _grid_boundary_flags(grid, gp, context)["on_active_spatial_boundary"]
             for gp in grid.grid if not gp.get("err")
         )
     return report
@@ -3659,8 +3684,9 @@ def build_posterior_cells(solution, *, variance_scale: float = 1.0) -> pd.DataFr
         raise RuntimeError("No valid BayesISOLA space-time cells are available.")
 
     rows: list[dict[str, Any]] = []
+    boundary_context = _grid_boundary_context(solution.g)
     for gi, gp in valid_grid:
-        spatial_flags = _grid_boundary_flags(solution.g, gp)
+        spatial_flags = _grid_boundary_flags(solution.g, gp, boundary_context)
         for si, GP in gp["shifts"].items():
             si = int(si)
             shift_s = float(solution.d.shifts[si])
@@ -5201,6 +5227,9 @@ def _run_adaptive_axitra_stage(
     store_station_normal_equations: bool = False,
     gf_fmax_factor: float | None = None,
     gf_bundle_depths: bool = True,
+    gf_store_dir: str | Path | None = None,
+    gf_table: Any = None,
+    gf_xl_km: float | None = None,
 ) -> tuple[Any, Any, Any, Any, bool]:
     """Rerun Axitra on an explicit adaptive grid without reacquiring waveforms.
 
@@ -5248,6 +5277,9 @@ def _run_adaptive_axitra_stage(
         decimate_shift=False,
         gf_fmax_factor=gf_fmax_factor,
         gf_bundle_depths=gf_bundle_depths,
+        gf_store_dir=gf_store_dir,
+        gf_table=gf_table,
+        gf_xl_km=gf_xl_km,
     )
     _set_fixed_adaptive_time_window(data, grid, processing_depth_max_km)
 
@@ -5339,6 +5371,9 @@ def run_auto_cmt(
     use_precalculated_Green: bool | str = "auto",
     gf_fmax_factor: float | None = None,
     gf_bundle_depths: bool = True,
+    gf_store_dir: str | Path | None = None,
+    gf_table: Any = None,
+    gf_xl_km: float | None = None,
     covariance: str = "noise",
     crosscovariance: bool = False,
     deviatoric: bool = False,
@@ -5563,6 +5598,16 @@ def run_auto_cmt(
     every grid point/station offset as a receiver, instead of once per grid
     point. The elementary seismograms agree to float32 precision (~1e-7) and
     the Green's-function stage is 7-12x faster; ``False`` restores per-point runs.
+    Computed receivers are kept in a receiver-level store keyed by every Axitra
+    input (``<green_dir>/gf_store`` by default). Pass the same ``gf_store_dir``
+    to all runs of an event (station subsets, deviatoric runs) so receivers with
+    identical inputs are computed only once; results are unchanged.
+    Station subsets usually have a smaller farthest distance and so a smaller
+    Axitra ``xl`` (20x that distance), which prevents reuse; ``gf_xl_km``
+    (off by default) sets an event-wide minimum ``xl`` so they can share the
+    store, at the cost of a small numerical change.
+    ``gf_table`` (experimental, off by default) interpolates Green's functions
+    from a (depth, distance) table instead, see :mod:`BayesISOLA.gf_table`.
 
     Returns
     -------
@@ -5837,7 +5882,7 @@ def run_auto_cmt(
             axitra_model_manifest.to_csv(axitra_model_manifest_path, index=False)
 
     custom_figures: list[Path] = []
-    # Record sections are rendered after the solution is published (see end)
+    # Figures not needed for the solution are rendered after it is published (see end)
     deferred_figures: list[Callable[[], Path]] = []
     if plot and plot_preset != "none":
         deferred_figures.append(
@@ -5855,7 +5900,12 @@ def run_auto_cmt(
         else False
     )
     if detect_mouse:
-        inputs.detect_mouse(figures=mouse_figures)
+        # fit now, draw the figures after the solution is published
+        inputs.detect_mouse(figures=False)
+        if mouse_figures:
+            deferred_figures.append(
+                lambda: inputs.detect_mouse(figures=mouse_figures, update=False)
+            )
 
     use_noise = covariance == "noise"
     data = BayesISOLA.process_data(
@@ -5869,6 +5919,9 @@ def run_auto_cmt(
         trim_filter_data=False, decimate_shift=False,
         gf_fmax_factor=gf_fmax_factor,
         gf_bundle_depths=gf_bundle_depths,
+        gf_store_dir=gf_store_dir,
+        gf_table=gf_table,
+        gf_xl_km=gf_xl_km,
     )
     if adaptive_grid:
         _set_fixed_adaptive_time_window(data, grid, acquisition_grid_max_depth_km)
@@ -6027,6 +6080,9 @@ def run_auto_cmt(
                     processing_depth_max_km=acquisition_grid_max_depth_km,
                     gf_fmax_factor=gf_fmax_factor,
                     gf_bundle_depths=gf_bundle_depths,
+                    gf_store_dir=gf_store_dir,
+                    gf_table=gf_table,
+                    gf_xl_km=gf_xl_km,
                     save_non_inverted_covariance=bool(
                         html_output or (plot and plot_preset == "full")
                     ),
@@ -6091,6 +6147,9 @@ def run_auto_cmt(
                 processing_depth_max_km=acquisition_grid_max_depth_km,
                 gf_fmax_factor=gf_fmax_factor,
                 gf_bundle_depths=gf_bundle_depths,
+                gf_store_dir=gf_store_dir,
+                gf_table=gf_table,
+                gf_xl_km=gf_xl_km,
                 save_non_inverted_covariance=bool(
                     html_output or (plot and plot_preset == "full")
                 ),
@@ -6192,7 +6251,7 @@ def run_auto_cmt(
             return default
 
     for make_figure in deferred_figures:
-        figure = _render("record section", make_figure)
+        figure = _render("deferred figure", make_figure)
         if figure is not None:
             custom_figures.append(figure)
 

@@ -110,6 +110,7 @@ def test_depth_bundled_axitra_failure_marks_grid_point_invalid(tmp_path):
     module = _load_green_module()
     dummy, gp, green_dir, _ = _green_case(tmp_path)
     (green_dir / "station.dat").write_text("header\nheader\n  1.0 2.0 0.0 0 0 STA ?\n", encoding="utf-8")
+    (green_dir / "grdat.hed").write_text("&input\nnfreq=65\nnr=1\n/end\n", encoding="utf-8")
     module.Axitra_depth_chunk = lambda *args, **kwargs: (None, "gr_xyz failed\n")
     module.axitra_executable = lambda name: green_dir / name
 
