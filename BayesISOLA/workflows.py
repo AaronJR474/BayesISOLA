@@ -14,14 +14,16 @@ point-source moment-tensor parameterization or Axitra Green-function algorithms.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 import math
 import shutil
 import hashlib
 import io
+import threading
 import time
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -1350,6 +1352,7 @@ def get_mseed_stationxml(
     max_realtime_wait_s: float | None = None,
     max_download_attempts: int = 3,
     download_retry_wait_s: float = 60.0,
+    download_workers: int = 8,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Discover/acquire BayesISOLA-ready miniSEED and StationXML.
 
@@ -1372,6 +1375,7 @@ def get_mseed_stationxml(
     passes. Each later pass waits ``download_retry_wait_s`` and only re-requests
     the stations that failed transiently, giving a loaded real-time server time
     to recover. "No data" and empty-stream failures are not retried.
+    Up to ``download_workers`` stations are requested in parallel (1 = serial).
 
     ``max_radius_km`` behaves similarly: ``None`` uses :func:`get_max_radius` from
     the MTtime workflow (default scale factor 1.66), while a numerical value is a
@@ -1584,21 +1588,20 @@ def get_mseed_stationxml(
             waveform_window["realtime_wait_s"] = float(wait_s)
 
     taup = TauPyModel(model=str(taup_model))
+    taup_lock = threading.Lock()
     successful_station_ids: set[str] = set()
     successful_rows: list[dict[str, Any]] = []
 
-    # Transient failures are retried in later passes, re-requesting only the
-    # stations that failed so a loaded real-time server can recover.
-    pending_rows = candidate_df.to_dict("records")
-    for attempt in range(1, int(max_download_attempts) + 1):
-        if attempt > 1:
-            print(
-                f"{len(pending_rows)} station download(s) failed transiently; waiting "
-                f"{float(download_retry_wait_s):.0f}s before attempt {attempt}/{int(max_download_attempts)}."
-            )
-            time.sleep(float(download_retry_wait_s))
+    def _row_station_id(row: Mapping[str, Any]) -> str:
+        location = _normalize_location(row.get("location"))
+        return str(row.get("station_id") or f"{row['network']}.{row['station']}.{location or '--'}")
+
+    def _acquire_station(rows: list[dict[str, Any]], attempt: int) -> tuple[list[dict[str, Any]], dict[str, Any] | None, list[dict[str, Any]]]:
+        """Try one station's candidate rows in client order (run in a worker thread)."""
+        logs: list[dict[str, Any]] = []
         retry_rows: list[dict[str, Any]] = []
-        for row in pending_rows:
+        success: dict[str, Any] | None = None
+        for row in rows:
             client_index = int(row.get("fdsn_client_index", 0))
             if client_index < 0 or client_index >= len(fdsn_clients):
                 raise ValueError(f"Station row references fdsn_client_index={client_index}, but only {len(fdsn_clients)} active clients exist.")
@@ -1608,8 +1611,8 @@ def get_mseed_stationxml(
             location_request = location if location else "--"
             station_id = str(row.get("station_id") or f"{row['network']}.{row['station']}.{location or '--'}")
 
-            if station_id in successful_station_ids:
-                log_rows.append({**row, "station_id": station_id, "fdsn_client": client_label, "status": "duplicate_client_station",
+            if success is not None:
+                logs.append({**row, "station_id": station_id, "fdsn_client": client_label, "status": "duplicate_client_station",
                                  "reason": "The same network/station/location was already acquired successfully from an earlier client.", "cache_reason": "not_checked"})
                 continue
 
@@ -1620,12 +1623,13 @@ def get_mseed_stationxml(
                 distance_m, azimuth, back_azimuth = gps2dist_azimuth(event_lat, event_lon, float(row["station_lat"]), float(row["station_lon"]))
                 distance_km = float(distance_m) / 1000.0
             if distance_km < min_radius_km - distance_tolerance_km or distance_km > max_radius_km + distance_tolerance_km:
-                log_rows.append({**row, "station_id": station_id, "fdsn_client": client_label, "distance_km": distance_km,
+                logs.append({**row, "station_id": station_id, "fdsn_client": client_label, "distance_km": distance_km,
                                  "status": "distance_excluded", "reason": f"Distance {distance_km:.6f} km lies outside [{min_radius_km:.6f}, {max_radius_km:.6f}] km.",
                                  "cache_reason": "not_checked"})
                 continue
 
-            p_time, s_time = _compute_arrivals(taup, event_depth_km, event_lat, event_lon, float(row["station_lat"]), float(row["station_lon"]))
+            with taup_lock:
+                p_time, s_time = _compute_arrivals(taup, event_depth_km, event_lat, event_lon, float(row["station_lat"]), float(row["station_lon"]))
             base = {**row, "event_id": event_id, "station_id": station_id, "fdsn_client": client_label, "location": location,
                     "distance_km": distance_km, "azimuth_deg": float(azimuth) % 360.0 if np.isfinite(azimuth) else np.nan,
                     "back_azimuth_deg": float(back_azimuth) % 360.0 if np.isfinite(back_azimuth) else np.nan,
@@ -1672,7 +1676,7 @@ def get_mseed_stationxml(
                     retry = attempt < max_download_attempts and _is_retryable_download_error(exc)
                     if retry:
                         retry_rows.append(row)
-                    log_rows.append({**base, "request_starttime": str(request_start), "request_endtime": str(request_end),
+                    logs.append({**base, "request_starttime": str(request_start), "request_endtime": str(request_end),
                                      "status": "download_retry" if retry else "download_failed", "reason": str(exc),
                                      "cache_reason": cache_reason, "download_attempt": attempt})
                     continue
@@ -1681,9 +1685,44 @@ def get_mseed_stationxml(
                           "magnitude": magnitude, "min_radius_km": min_radius_km, "max_radius_km": max_radius_km,
                           "request_starttime": str(request_start), "request_endtime": str(request_end), "waveform_path": str(waveform_path),
                           "stationxml_path": str(stationxml_path), "download_status": status}
-            successful_rows.append(successful); successful_station_ids.add(station_id)
-            log_rows.append({**base, "request_starttime": str(request_start), "request_endtime": str(request_end),
+            success = successful
+            logs.append({**base, "request_starttime": str(request_start), "request_endtime": str(request_end),
                              "status": status, "reason": "", "cache_reason": cache_reason, "download_attempt": attempt})
+        return logs, success, retry_rows
+
+    # Transient failures are retried in later passes, re-requesting only the
+    # stations that failed so a loaded real-time server can recover. Stations
+    # are downloaded in parallel; one station's rows (one per client) stay in
+    # a single task so an earlier client still takes precedence.
+    pending_rows = candidate_df.to_dict("records")
+    for attempt in range(1, int(max_download_attempts) + 1):
+        if attempt > 1:
+            print(
+                f"{len(pending_rows)} station download(s) failed transiently; waiting "
+                f"{float(download_retry_wait_s):.0f}s before attempt {attempt}/{int(max_download_attempts)}."
+            )
+            time.sleep(float(download_retry_wait_s))
+        station_groups: dict[str, list[dict[str, Any]]] = {}
+        for row in pending_rows:
+            client_index = int(row.get("fdsn_client_index", 0))
+            if client_index < 0 or client_index >= len(fdsn_clients):
+                raise ValueError(f"Station row references fdsn_client_index={client_index}, but only {len(fdsn_clients)} active clients exist.")
+            station_id = _row_station_id(row)
+            if station_id in successful_station_ids:
+                client_label = str(row.get("fdsn_client", requested_client_labels[client_index]))
+                log_rows.append({**row, "station_id": station_id, "fdsn_client": client_label, "status": "duplicate_client_station",
+                                 "reason": "The same network/station/location was already acquired successfully from an earlier client.", "cache_reason": "not_checked"})
+                continue
+            station_groups.setdefault(station_id, []).append(row)
+        with ThreadPoolExecutor(max_workers=max(1, int(download_workers))) as executor:
+            outcomes = list(executor.map(lambda rows: _acquire_station(rows, attempt), station_groups.values()))
+        retry_rows: list[dict[str, Any]] = []
+        for logs, success, station_retry_rows in outcomes:
+            log_rows.extend(logs)
+            retry_rows.extend(station_retry_rows)
+            if success is not None:
+                successful_rows.append(success)
+                successful_station_ids.add(str(success["station_id"]))
         if not retry_rows:
             break
         pending_rows = retry_rows
@@ -2977,28 +3016,52 @@ def suggest_depth_limits(
     }
 
 
-def _grid_boundary_flags(grid, gp: Mapping[str, Any]) -> dict[str, bool]:
+def _grid_boundary_context(grid) -> dict[str, Any]:
+    """Grid-wide values used by :func:`_grid_boundary_flags`.
+
+    Computing them once and passing them to every per-point call keeps loops
+    over the grid linear instead of quadratic.
+    """
+    depths = sorted({float(point["z"]) for point in grid.grid if not point.get("err")})
+    step_x = float(grid.step_x)
+    radius = float(grid.radius)
+    n_steps = int(radius / step_x) if step_x > 0 else 0
+    xy = {(float(point["x"]), float(point["y"])) for point in grid.grid if not point.get("err")}
+    return {
+        "has_depths": bool(depths),
+        "depth_lo": depths[0] if depths else np.nan,
+        "depth_hi": depths[-1] if depths else np.nan,
+        "step_x": step_x,
+        "radius": radius,
+        "n_steps": n_steps,
+        "horizontal_fixed": len(xy) <= 1 or radius <= 0.0 or n_steps <= 0,
+    }
+
+
+def _grid_boundary_flags(grid, gp: Mapping[str, Any], context: Mapping[str, Any] | None = None) -> dict[str, bool]:
     """Return dimension-specific boundary flags for one spatial grid point.
 
     Native BayesISOLA stores depth and horizontal boundaries in one ``edge``
     boolean.  A one-point horizontal grid (radius/steps equal to zero) is a
     deliberate fixed-XY constraint, not a horizontal boundary failure.
+    ``context`` is :func:`_grid_boundary_context` of ``grid``, computed here
+    when not given.
     """
-    depths = sorted({float(point["z"]) for point in grid.grid if not point.get("err")})
-    depth_lo = depths[0] if depths else np.nan
-    depth_hi = depths[-1] if depths else np.nan
-    step_x = float(grid.step_x)
-    radius = float(grid.radius)
-    n_steps = int(radius / step_x) if step_x > 0 else 0
-
-    xy = {(float(point["x"]), float(point["y"])) for point in grid.grid if not point.get("err")}
-    horizontal_fixed = len(xy) <= 1 or radius <= 0.0 or n_steps <= 0
+    if context is None:
+        context = _grid_boundary_context(grid)
+    has_depths = context["has_depths"]
+    depth_lo = context["depth_lo"]
+    depth_hi = context["depth_hi"]
+    step_x = context["step_x"]
+    radius = context["radius"]
+    n_steps = context["n_steps"]
+    horizontal_fixed = context["horizontal_fixed"]
 
     z = float(gp["z"])
     x = float(gp["x"])
     y = float(gp["y"])
-    depth_floor = bool(depths) and np.isclose(z, depth_lo)
-    depth_ceiling = bool(depths) and np.isclose(z, depth_hi)
+    depth_floor = has_depths and np.isclose(z, depth_lo)
+    depth_ceiling = has_depths and np.isclose(z, depth_hi)
 
     horizontal = False
     north = south = east = west = False
@@ -3093,8 +3156,9 @@ def diagnose_grid_edge(grid, centroid: dict[str, Any] | None = None) -> dict[str
             reasons.append(f"depth at grid ceiling ({depth_hi / 1e3:.3f} km)")
         report["centroid_edge_reasons"] = reasons
     else:
+        context = _grid_boundary_context(grid)
         report["n_edge_points"] = sum(
-            _grid_boundary_flags(grid, gp)["on_active_spatial_boundary"]
+            _grid_boundary_flags(grid, gp, context)["on_active_spatial_boundary"]
             for gp in grid.grid if not gp.get("err")
         )
     return report
@@ -3620,8 +3684,9 @@ def build_posterior_cells(solution, *, variance_scale: float = 1.0) -> pd.DataFr
         raise RuntimeError("No valid BayesISOLA space-time cells are available.")
 
     rows: list[dict[str, Any]] = []
+    boundary_context = _grid_boundary_context(solution.g)
     for gi, gp in valid_grid:
-        spatial_flags = _grid_boundary_flags(solution.g, gp)
+        spatial_flags = _grid_boundary_flags(solution.g, gp, boundary_context)
         for si, GP in gp["shifts"].items():
             si = int(si)
             shift_s = float(solution.d.shifts[si])
@@ -5160,6 +5225,11 @@ def _run_adaptive_axitra_stage(
     processing_depth_max_km: float | None = None,
     save_non_inverted_covariance: bool = False,
     store_station_normal_equations: bool = False,
+    gf_fmax_factor: float | None = None,
+    gf_bundle_depths: bool = True,
+    gf_store_dir: str | Path | None = None,
+    gf_table: Any = None,
+    gf_xl_km: float | None = None,
 ) -> tuple[Any, Any, Any, Any, bool]:
     """Rerun Axitra on an explicit adaptive grid without reacquiring waveforms.
 
@@ -5205,6 +5275,11 @@ def _run_adaptive_axitra_stage(
         calculate_or_verify_Green=False,
         trim_filter_data=False,
         decimate_shift=False,
+        gf_fmax_factor=gf_fmax_factor,
+        gf_bundle_depths=gf_bundle_depths,
+        gf_store_dir=gf_store_dir,
+        gf_table=gf_table,
+        gf_xl_km=gf_xl_km,
     )
     _set_fixed_adaptive_time_window(data, grid, processing_depth_max_km)
 
@@ -5267,6 +5342,7 @@ def run_auto_cmt(
     overwrite_waveforms: bool = False,
     max_download_attempts: int = 3,
     download_retry_wait_s: float = 60.0,
+    download_workers: int = 8,
     location_unc_km: float = 0.0,
     time_unc_s: float = 2.0,
     min_depth_km: float = 5.0,
@@ -5293,6 +5369,11 @@ def run_auto_cmt(
     progress: bool = True,
     invert_displacement: bool = False,
     use_precalculated_Green: bool | str = "auto",
+    gf_fmax_factor: float | None = None,
+    gf_bundle_depths: bool = True,
+    gf_store_dir: str | Path | None = None,
+    gf_table: Any = None,
+    gf_xl_km: float | None = None,
     covariance: str = "noise",
     crosscovariance: bool = False,
     deviatoric: bool = False,
@@ -5307,6 +5388,7 @@ def run_auto_cmt(
     show: bool = True,
     html_output: bool = True,
     write_report: bool = False,
+    solution_callback: Callable[[dict[str, Any]], Any] | None = None,
     profile_crs: str = "EPSG:4326",
     velocity_depth_col: str = "Depth_km",
     vp_col: str = "Vp",
@@ -5500,6 +5582,33 @@ def run_auto_cmt(
     display/export semantics. ``write_report=True`` independently writes the curated
     workflow-level ``report.html`` from the completed ``run`` mapping.
 
+    Speed and publishing
+    --------------------
+    ``solution_callback`` is called with the ``run`` mapping as soon as the
+    result tables are written and before any figure or report is rendered, so
+    a caller can publish the solution without waiting for plotting. Figure and
+    report failures are then reported as warnings (``run['plot_errors']``)
+    instead of discarding the finished solution. ``download_workers`` sets how
+    many stations are downloaded in parallel (1 restores serial downloads).
+    ``gf_fmax_factor`` computes Axitra Green's functions only up to
+    ``gf_fmax_factor * freqmax`` instead of the Nyquist frequency; ``None``
+    (default) keeps the original behaviour. A factor of 3 changes the filtered
+    Green's functions by about 1-2% for about 25% less Axitra time.
+    ``gf_bundle_depths=True`` (default) runs Axitra once per source depth with
+    every grid point/station offset as a receiver, instead of once per grid
+    point. The elementary seismograms agree to float32 precision (~1e-7) and
+    the Green's-function stage is 7-12x faster; ``False`` restores per-point runs.
+    Computed receivers are kept in a receiver-level store keyed by every Axitra
+    input (``<green_dir>/gf_store`` by default). Pass the same ``gf_store_dir``
+    to all runs of an event (station subsets, deviatoric runs) so receivers with
+    identical inputs are computed only once; results are unchanged.
+    Station subsets usually have a smaller farthest distance and so a smaller
+    Axitra ``xl`` (20x that distance), which prevents reuse; ``gf_xl_km``
+    (off by default) sets an event-wide minimum ``xl`` so they can share the
+    store, at the cost of a small numerical change.
+    ``gf_table`` (experimental, off by default) interpolates Green's functions
+    from a (depth, distance) table instead, see :mod:`BayesISOLA.gf_table`.
+
     Returns
     -------
     dict
@@ -5627,6 +5736,7 @@ def run_auto_cmt(
             overwrite=bool(overwrite_waveforms), plot=False, show=False,
             max_download_attempts=max_download_attempts,
             download_retry_wait_s=download_retry_wait_s,
+            download_workers=download_workers,
         )
     else:
         stations = _coerce_station_df(station_df)
@@ -5772,10 +5882,12 @@ def run_auto_cmt(
             axitra_model_manifest.to_csv(axitra_model_manifest_path, index=False)
 
     custom_figures: list[Path] = []
+    # Figures not needed for the solution are rendered after it is published (see end)
+    deferred_figures: list[Callable[[], Path]] = []
     if plot and plot_preset != "none":
-        custom_figures.append(
-            plot_waveform_section(
-                loaded_stations, origin_time,
+        deferred_figures.append(
+            lambda stations=loaded_stations: plot_waveform_section(
+                stations, origin_time,
                 figure_path / "waveform_record_section_unfiltered.png", show=False,
             )
         )
@@ -5788,7 +5900,12 @@ def run_auto_cmt(
         else False
     )
     if detect_mouse:
-        inputs.detect_mouse(figures=mouse_figures)
+        # fit now, draw the figures after the solution is published
+        inputs.detect_mouse(figures=False)
+        if mouse_figures:
+            deferred_figures.append(
+                lambda: inputs.detect_mouse(figures=mouse_figures, update=False)
+            )
 
     use_noise = covariance == "noise"
     data = BayesISOLA.process_data(
@@ -5800,6 +5917,11 @@ def run_auto_cmt(
         min_depth=depth_spec["grid_min_depth_km"] * 1000.0,
         calculate_or_verify_Green=False,
         trim_filter_data=False, decimate_shift=False,
+        gf_fmax_factor=gf_fmax_factor,
+        gf_bundle_depths=gf_bundle_depths,
+        gf_store_dir=gf_store_dir,
+        gf_table=gf_table,
+        gf_xl_km=gf_xl_km,
     )
     if adaptive_grid:
         _set_fixed_adaptive_time_window(data, grid, acquisition_grid_max_depth_km)
@@ -5836,9 +5958,9 @@ def run_auto_cmt(
     data.decimate_shift()
 
     if plot and plot_preset != "none":
-        custom_figures.append(
-            plot_station_section(
-                data, loaded_stations,
+        deferred_figures.append(
+            lambda data=data, stations=loaded_stations: plot_station_section(
+                data, stations,
                 figure_path / "waveform_record_section.png", show=False,
             )
         )
@@ -5956,6 +6078,11 @@ def run_auto_cmt(
                     deviatoric=bool(deviatoric),
                     normalized_gf_options=normalized_gf_options,
                     processing_depth_max_km=acquisition_grid_max_depth_km,
+                    gf_fmax_factor=gf_fmax_factor,
+                    gf_bundle_depths=gf_bundle_depths,
+                    gf_store_dir=gf_store_dir,
+                    gf_table=gf_table,
+                    gf_xl_km=gf_xl_km,
                     save_non_inverted_covariance=bool(
                         html_output or (plot and plot_preset == "full")
                     ),
@@ -6018,6 +6145,11 @@ def run_auto_cmt(
                 deviatoric=bool(deviatoric),
                 normalized_gf_options=normalized_gf_options,
                 processing_depth_max_km=acquisition_grid_max_depth_km,
+                gf_fmax_factor=gf_fmax_factor,
+                gf_bundle_depths=gf_bundle_depths,
+                gf_store_dir=gf_store_dir,
+                gf_table=gf_table,
+                gf_xl_km=gf_xl_km,
                 save_non_inverted_covariance=bool(
                     html_output or (plot and plot_preset == "full")
                 ),
@@ -6101,23 +6233,45 @@ def run_auto_cmt(
         "native_html_path": None, "report_path": None,
     }
 
+    # Hand the finished solution to the caller before any (slow) rendering
+    if solution_callback is not None:
+        solution_callback(run)
+
+    # Figures and reports must never discard a finished solution: failures are
+    # kept in run["plot_errors"] and reported as warnings
+    plot_errors: list[str] = []
+    run["plot_errors"] = plot_errors
+
+    def _render(label: str, func: Callable[[], Any], default: Any = None) -> Any:
+        try:
+            return func()
+        except Exception as exc:
+            plot_errors.append(f"{label}: {type(exc).__name__}: {exc}")
+            warnings.warn(f"BayesISOLA {label} failed: {type(exc).__name__}: {exc}", RuntimeWarning, stacklevel=2)
+            return default
+
+    for make_figure in deferred_figures:
+        figure = _render("deferred figure", make_figure)
+        if figure is not None:
+            custom_figures.append(figure)
+
     # Workflow-level diagnostic figures. These are separate from PLOT_PRESETS
     # because the latter is passed directly to BayesISOLA.plot and must retain
     # its native keyword contract.
     diagnostic_names = _DIAGNOSTIC_PLOT_PRESETS[plot_preset]
     if plot and diagnostic_names:
-        diagnostic_paths = _write_diagnostic_preset(
+        diagnostic_paths = _render("diagnostic figures", lambda: _write_diagnostic_preset(
             run, plot_preset, figure_path,
             tensor_mode="deviatoric" if deviatoric else "full",
             dpi=200,
-        )
+        ), default=[])
         custom_figures = [*diagnostic_paths, *custom_figures]
 
     # Native plotting and native HTML are intentionally separate concerns.
     # ``summary`` is workflow-facing only; ``html_output`` always receives the
     # complete historical BayesISOLA figure suite but those HTML-only files stay
     # out of ``figure_paths``/``show``.
-    plot_object, native_figures, native_html_path = _render_native_outputs(
+    plot_object, native_figures, native_html_path = _render("native figures", lambda: _render_native_outputs(
         solution,
         output_path,
         event_id=event_id,
@@ -6126,7 +6280,7 @@ def run_auto_cmt(
         html_output=html_output,
         use_noise=use_noise,
         detect_mouse=bool(detect_mouse),
-    )
+    ), default=(None, [], None))
 
     run["plot"] = plot_object
     run["native_html_path"] = native_html_path
@@ -6136,13 +6290,13 @@ def run_auto_cmt(
     # The curated report is generated only after the run mapping is complete so
     # standalone notebook calls and automatic generation are identical.
     if write_report:
-        run["report_path"] = write_html_report(
+        run["report_path"] = _render("HTML report", lambda: write_html_report(
             run,
             output_file=output_path / "report.html",
             embed_images=False,
             reuse_existing_figures=bool(plot and diagnostic_names),
             dpi=200,
-        )
+        ))
 
     if show and figure_paths:
         _display_saved_figures(figure_paths)

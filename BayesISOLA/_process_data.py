@@ -99,12 +99,21 @@ def decimate_shift(self):
 	length = self.t_max-self.t_min
 	endtime = starttime + length
 	decimate = int(round(self.max_samprate / self.samprate))
+	# Slicing deep-copies trace headers; the instrument response attached to them
+	# is not needed for the shifted copies, so slice light copies (same samples)
+	sources = []
+	for st in self.data:
+		light = st.copy()
+		for tr in light:
+			tr.stats.pop('response', None)
+			tr.stats.pop('paz', None)
+		sources.append(light)
 	for SHIFT in range(self.grid.SHIFT_min, self.grid.SHIFT_max+1, self.grid.SHIFT_step):
 		#data = deepcopy(self.data)
 		shift = SHIFT / self.max_samprate
 		self.shifts.append(shift)
 		data = []
-		for st in self.data:
+		for st in sources:
 			st2 = st.slice(starttime+shift-self.elemse_start_origin, endtime+shift+1) # we add 1 s to be sure, that no index will point outside the range
 			st2.trim(starttime+shift-self.elemse_start_origin, endtime+shift+1, pad=True, fill_value=0.) # short records are not inverted, but they should by padded because of plotting
 			if self.invert_displacement:

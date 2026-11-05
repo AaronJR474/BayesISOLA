@@ -5,7 +5,7 @@ import os.path
 
 from BayesISOLA.MouseTrap import *
 
-def detect_mouse(self, mouse_len = 2.5*60, mouse_onset = 1*60, fit_t1=-20, fit_t2c=0, fit_t2v=1200, figures=None, figures_mkdir=True):
+def detect_mouse(self, mouse_len = 2.5*60, mouse_onset = 1*60, fit_t1=-20, fit_t2c=0, fit_t2v=1200, figures=None, figures_mkdir=True, update=True):
 	r"""
 	Wrapper for :class:`MouseTrap`
 	
@@ -16,8 +16,11 @@ def detect_mouse(self, mouse_len = 2.5*60, mouse_onset = 1*60, fit_t1=-20, fit_t
 	:param fit_t2v: mouse fitting endtime -- linear term (see equation below)
 	
 	Endtime of fitting is :math:`t_2 = \mathrm{fit\_t2c} + \mathrm{dist} / \mathrm{fit\_t2v}` where :math:`\mathrm{dist}` is station epicentral distance.
+
+	:param update: if ``False``, only draw the figures (e.g. after the inversion): component flags and the log are left unchanged
 	"""
-	self.log('\nMouse detection:')
+	if update:
+		self.log('\nMouse detection:')
 	out = ''
 	for st0 in self.data_raw:
 		st = st0.copy()
@@ -43,14 +46,16 @@ def detect_mouse(self, mouse_len = 2.5*60, mouse_onset = 1*60, fit_t1=-20, fit_t
 				m1.fit_mouse(st[comp], t_min=t_start_origin+fit_t1, t_max=t_start_origin+fit_t2c+dist/fit_t2v)
 			except:
 				out += '  ' + sta + ' ' + stats.channel + ': MOUSE detecting problem (record too short?), ignoring component in inversion\n'
-				self.stations_index['_'.join([stats.network, sta, stats.location, stats.channel[0:2]])]['use'+stats.channel[2]] = False
+				if update:
+					self.stations_index['_'.join([stats.network, sta, stats.location, stats.channel[0:2]])]['use'+stats.channel[2]] = False
 			else:
 				onset, amp, dummy, dummy, fit = m1.params(degrees=True)
 				amp = abs(amp)
 				detected=False
 				if (amp > 50e-8 and fit > 0.6) or (amp > 10e-8 and fit > 0.8) or (amp > 7e-8 and fit > 0.9) or (amp > 5e-9 and fit > 0.94) or (fit > 0.985): # DEBUGGING: fit > 0.95 in the before-last parentheses?
 					out += '  ' + sta + ' ' + stats.channel + ': MOUSE detected, ignoring component in inversion (time of onset: {o:6.1f} s, amplitude: {a:10.2e} m s^-2, fit: {f:7.2f})\n'.format(o=onset-t_start_origin, a=amp, f=fit)
-					self.stations_index['_'.join([stats.network, sta, stats.location, stats.channel[0:2]])]['use'+stats.channel[2]] = False
+					if update:
+						self.stations_index['_'.join([stats.network, sta, stats.location, stats.channel[0:2]])]['use'+stats.channel[2]] = False
 					detected=True
 				if figures:
 					if figures is True:
@@ -58,5 +63,6 @@ def detect_mouse(self, mouse_len = 2.5*60, mouse_onset = 1*60, fit_t1=-20, fit_t
 					if not os.path.exists(figures) and figures_mkdir:
 						os.makedirs(figures, exist_ok=True)
 					m1.plot(st[comp], outfile=os.path.join(figures, 'mouse_'+('no','YES')[detected]+'_'+sta+str(comp)+'.png'), xmin=t_start_origin-60, xmax=t_start_origin+240, ylabel='raw displacement [counts]', title="{{net:s}}:{{sta:s}} {{ch:s}}, fit: {fit:4.2f}".format(fit=fit))
-	self.logtext['mouse'] = out
-	self.log(out, newline=False)
+	if update:
+		self.logtext['mouse'] = out
+		self.log(out, newline=False)

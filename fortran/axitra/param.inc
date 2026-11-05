@@ -16,8 +16,10 @@ c**********************************************************************
       integer   in1,in2,in3,out,out2
       parameter (in1=10,in2=11,in3=12,out=13,out2=14)
 
-      integer   nsp,nrp,ncp,nrsp,ikmin
-      parameter (nsp=1,nrp=101,ncp=200,nrsp=nrp*nsp,ikmin=100)
+c     nrp is large so one run can hold every (grid point, station) offset
+c     of a source depth; nzrp limits distinct receiver depths per layer
+      integer   nsp,nrp,ncp,nrsp,ikmin,nzrp
+      parameter (nsp=1,nrp=1000,ncp=200,nrsp=nrp*nsp,ikmin=100,nzrp=101)
       real*8    explim
       parameter (explim=-600.)
 

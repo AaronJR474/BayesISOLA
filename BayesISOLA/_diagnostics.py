@@ -695,8 +695,8 @@ def plot_adaptive_history(run, figsize=(10.0, 2.8), dpi=200):
         vr = 100.0 * pd.to_numeric(h["variance_reduction"], errors="coerce").to_numpy(dtype=float)
         ax.plot(x, vr, marker="o", markersize=4)
         if "on_active_spatial_boundary" in h:
-            boundary = h["on_active_spatial_boundary"].fillna(False).astype(bool).to_numpy()
-            boundary &= np.isfinite(vr)
+            # pandas copy-on-write can hand back a read-only array, so no in-place &=
+            boundary = h["on_active_spatial_boundary"].fillna(False).astype(bool).to_numpy() & np.isfinite(vr)
             if boundary.any():
                 ax.scatter(x[boundary], vr[boundary], marker="x", s=45, label="Boundary")
                 ax.legend(frameon=False)

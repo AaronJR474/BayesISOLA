@@ -7,7 +7,9 @@ Various data manipulation / arithmetic / waveform filtering functions.
 """
 
 import numpy as np
+from functools import lru_cache
 from math import gcd
+from scipy.signal import iirfilter, sosfilt
 
 def rename_keys(somedict, prefix='', suffix=''):
 	"""
@@ -48,15 +50,86 @@ def lcmm(b, *args):
 		b = gcd(a, b)
 	return 3/b
 
+@lru_cache(maxsize=256)
+def _butter_sos(btype, freq, df, corners):
+	"""
+	Butterworth SOS coefficients designed exactly as ObsPy's lowpass/highpass
+
+	Parameters
+	----------
+	btype : str
+		'lowpass' or 'highpass'
+	freq : float
+		Corner frequency [Hz]
+	df : float
+		Sampling rate [Hz]
+	corners : int
+		Filter order
+
+	Returns
+	-------
+	sos : np.ndarray
+		Second-order sections, shared through the cache so must not be modified
+	"""
+	fe = 0.5 * df
+	if btype == 'highpass' and freq / fe > 1:
+		raise ValueError("Selected corner frequency is above Nyquist.")
+	return iirfilter(corners, freq / fe, btype=btype, ftype='butter', output='sos')
+
+def filter_array(data, df, fmin, fmax):
+	"""
+	Apply the :func:`my_filter` filter chain to an array along its last axis
+
+	Bit-identical to filtering every row with ObsPy, without the per-call
+	overhead of ObsPy's entry-point lookup and processing history.
+
+	Parameters
+	----------
+	data : np.ndarray
+		Waveforms, time along the last axis
+	df : float
+		Sampling rate [Hz]
+	fmin : float
+		Highpass corner [Hz], skipped if 0 or None
+	fmax : float
+		Lowpass corner [Hz], skipped if 0 or None
+
+	Returns
+	-------
+	data : np.ndarray
+		Filtered waveforms (float64)
+	"""
+	if fmax:
+		data = sosfilt(_butter_sos('lowpass', float(fmax), float(df), 4), data, axis=-1)
+	if fmin:
+		sos = _butter_sos('highpass', float(fmin), float(df), 2)
+		data = sosfilt(sos, data, axis=-1)
+		data = sosfilt(sos, data, axis=-1)
+	return data
+
 def my_filter(data, fmin, fmax):
 	"""
 	Filter used for filtering both elementary and observed seismograms
+
+	Lowpass (4 corners) at ``fmax`` then twice highpass (2 corners) at ``fmin``,
+	all causal Butterworth, applied in place to every trace of a Stream.
+	Traces sharing sampling rate and length are filtered in one batched call.
 	"""
-	if fmax:
-		data.filter('lowpass', freq=fmax)
-	if fmin:
-		data.filter('highpass', freq=fmin, corners=2)
-		data.filter('highpass', freq=fmin, corners=2)
+	groups = {}
+	for tr in data:
+		if np.ma.isMaskedArray(tr.data):
+			# keep ObsPy's handling (it raises for masked data)
+			if fmax:
+				tr.filter('lowpass', freq=fmax)
+			if fmin:
+				tr.filter('highpass', freq=fmin, corners=2)
+				tr.filter('highpass', freq=fmin, corners=2)
+			continue
+		groups.setdefault((tr.stats.sampling_rate, tr.stats.npts), []).append(tr)
+	for (df, _), traces in groups.items():
+		filtered = filter_array(np.vstack([tr.data for tr in traces]), df, fmin, fmax)
+		for tr, row in zip(traces, filtered):
+			tr.data = row
 
 def prefilter_data(st, f):
 	"""

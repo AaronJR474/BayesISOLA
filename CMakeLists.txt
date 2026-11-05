@@ -7,7 +7,9 @@ endif()
 project(${SKBUILD_PROJECT_NAME} LANGUAGES Fortran)
 
 if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
-    set(CMAKE_Fortran_FLAGS_RELEASE "-O0" CACHE STRING "" FORCE)
+    # -O2 is safe now that gr_xyz initialises lastik (it was -O0 to hide that bug)
+    # -ffpe-summary=none: no IEEE-flag notes on stderr (they were logged per point)
+    set(CMAKE_Fortran_FLAGS_RELEASE "-O2 -ffpe-summary=none" CACHE STRING "" FORCE)
 endif()
 
 set(AXITRA_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fortran/axitra")

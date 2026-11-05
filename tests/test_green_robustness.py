@@ -15,6 +15,8 @@ def _load_green_module():
 
     axitra = types.ModuleType("BayesISOLA.axitra")
     axitra.Axitra_wrapper = lambda *args, **kwargs: True
+    axitra.Axitra_depth_chunk = lambda *args, **kwargs: (None, "stub")
+    axitra.AXITRA_MAX_RECEIVERS = 1000
 
     syngine = types.ModuleType("BayesISOLA.syngine")
 
@@ -94,6 +96,7 @@ def test_green_cache_rejects_empty_metadata(tmp_path):
 def test_serial_axitra_failure_marks_grid_point_invalid(tmp_path):
     module = _load_green_module()
     dummy, gp, green_dir, _ = _green_case(tmp_path)
+    dummy.gf_bundle_depths = False
     module.Axitra_wrapper = lambda *args, **kwargs: False
     module.axitra_executable = lambda name: green_dir / name
 
@@ -101,3 +104,18 @@ def test_serial_axitra_failure_marks_grid_point_invalid(tmp_path):
 
     assert gp["err"] == 1
     assert gp["VR"] == -10
+
+
+def test_depth_bundled_axitra_failure_marks_grid_point_invalid(tmp_path):
+    module = _load_green_module()
+    dummy, gp, green_dir, _ = _green_case(tmp_path)
+    (green_dir / "station.dat").write_text("header\nheader\n  1.0 2.0 0.0 0 0 STA ?\n", encoding="utf-8")
+    (green_dir / "grdat.hed").write_text("&input\nnfreq=65\nnr=1\n/end\n", encoding="utf-8")
+    module.Axitra_depth_chunk = lambda *args, **kwargs: (None, "gr_xyz failed\n")
+    module.axitra_executable = lambda name: green_dir / name
+
+    module.calculate_Green(dummy)
+
+    assert gp["err"] == 1
+    assert gp["VR"] == -10
+    assert "gr_xyz failed" in (tmp_path / "log_green.txt").read_text(encoding="utf-8")

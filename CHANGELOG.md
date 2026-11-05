@@ -2,6 +2,65 @@
 
 All notable changes to BayesISOLA are documented in this file.
 
+## [0.3.0] - 2026-11-05
+
+### Performance
+
+A production auto-CMT event (all_stations + azimuth + drop_outliers_dev runs,
+ML 4.1 event 2026p758320, 8 cores) went from 128.9 min to 7.9 min to all three
+solutions. Results are unchanged: moment tensors agree with 0.2.2 to < 5e-8
+relative (float32 rounding).
+
+- Filtering of elementary and observed seismograms (`helpers.my_filter`) no
+  longer goes through ObsPy `Trace.filter`. ObsPy resolves the filter function
+  through package entry points and re-reads package metadata on every call,
+  which was ~44% of all Python CPU time. The same Butterworth SOS coefficients
+  are now cached and applied to all traces in one `sosfilt` call
+  (bit-identical). New `helpers.filter_array`.
+- Elementary seismograms are read with one `np.fromfile` instead of one
+  `FortranFile.read_reals` call per sample (`fileformats.read_elemse_array`),
+  and the inversion assembles G with array operations (bit-identical, the
+  per-grid-point inversion is ~110x faster).
+- Axitra: `gr_xyz.for` read `lastik` before assigning it, which is why the
+  Fortran was built at `-O0` and points were retried up to 10 times. It is now
+  initialised and the binaries are built with `-O2` (byte-identical output,
+  ~2x faster); retries reduced to 2.
+- Axitra runs once per source depth instead of once per grid point: every
+  (grid point, station) offset of a depth is one receiver of a single
+  `gr_xyz`/`elemse` run, and the output is split into the usual per-point
+  elemse files (`gf_bundle_depths=True`, default). In a 1-D model this is the
+  same calculation; outputs agree to float32 precision. `nrp` raised to 1000,
+  `izrr` resized so memory does not grow with `nrp**2`, `elemse` allocates for
+  the receivers present.
+- Receiver-level Green's function store (`gf_store.py`, `gf_store_dir`):
+  computed receivers are keyed by every Axitra input and reused by adaptive
+  stages and by other runs of the same event (e.g. a station subset). Safe for
+  concurrent writers. Adaptive stages also reuse unchanged grid points by
+  coordinate.
+- `decimate_shift` slices light trace copies (it deep-copied the attached
+  StationXML response on every time shift), grid-boundary flags are computed
+  with one grid-wide context per loop (was O(n^2)), and stations are
+  downloaded in parallel (`download_workers`, default 8).
+
+### Workflow
+
+- `run_auto_cmt(solution_callback=...)` is called with the run mapping as soon
+  as the result tables are written, before any figure or report.
+- Figures and reports no longer abort a finished run: failures are collected in
+  `run["plot_errors"]` and reported as warnings. Record sections and mouse
+  figures are drawn after the solution (`detect_mouse(update=False)`).
+- Fixed `ValueError: output array is read-only` in
+  `_diagnostics.plot_adaptive_history` with pandas copy-on-write.
+
+### Opt-in options (off by default, change results slightly)
+
+- `gf_xl_km`: event-wide minimum Axitra `xl` so station-subset runs reuse the
+  store (0.11 deg Kagan angle change on the test event).
+- `gf_fmax_factor`: compute Axitra frequencies only up to a multiple of
+  `freqmax` (3x: 0.5-2% change in band-passed Green's functions).
+- `gf_table` (experimental, `gf_table.py`): Green's functions interpolated from
+  a (depth, distance) table with exact azimuthal rotation.
+
 ## [0.2.2] - 2026-11-03
 
 ### Near-real-time waveform acquisition

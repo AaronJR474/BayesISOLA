@@ -105,6 +105,8 @@ c++++++++++
       freq=-dfreq
       pil=pi2/xl
       iklast=0
+c     lastik was read uninitialised in the first frequency (garbage at -O2)
+      lastik=0
 
       call initdata
 
@@ -691,6 +693,10 @@ c                       compute nzr(),jrr
        if (tc) then
 	nzr(jr)=nzr(jr)+1
 	jrr=nzr(jr)
+	if (jrr.gt.nzrp) then
+	 write(0,*) 'too many receiver depths in one layer (nzrp)'
+	 stop
+	endif
        endif
 c                       compute nzrr(,),izrr(,,)
        nzrr(jrr,jr)=nzrr(jrr,jr)+1
